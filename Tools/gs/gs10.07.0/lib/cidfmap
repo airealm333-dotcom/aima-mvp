@@ -1,0 +1,39 @@
+%!
+% cidfmap generated automatically by mkcidfm.ps from fonts found in
+%   C:/WINDOWS/Fonts
+
+% Substitutions
+/ArialUnicodeMS-JP << /SubfontID 0 /FileType /TrueType /Path (C:/WINDOWS/Fonts/arialuni.ttf) /CSI [(Japan1) 3] >> ;
+/ArialUnicodeMS-CNS << /SubfontID 0 /FileType /TrueType /Path (C:/WINDOWS/Fonts/arialuni.ttf) /CSI [(CNS1) 2] >> ;
+/NSimSun << /SubfontID 1 /FileType /TrueType /Path (C:/WINDOWS/Fonts/simsun.ttc) /CSI [(GB1) 2] >> ;
+/MalgunGothicRegular << /SubfontID 0 /FileType /TrueType /Path (C:/WINDOWS/Fonts/malgun.ttf) /CSI [(Korea1) 3] >> ;
+/ArialUnicodeMS-GB << /SubfontID 0 /FileType /TrueType /Path (C:/WINDOWS/Fonts/arialuni.ttf) /CSI [(GB1) 2] >> ;
+/MS-PGothic << /SubfontID 1 /FileType /TrueType /Path (C:/WINDOWS/Fonts/msgothic.ttc) /CSI [(Japan1) 3] >> ;
+/SimSun << /SubfontID 0 /FileType /TrueType /Path (C:/WINDOWS/Fonts/simsun.ttc) /CSI [(GB1) 2] >> ;
+/MalgunGothicBold << /SubfontID 0 /FileType /TrueType /Path (C:/WINDOWS/Fonts/malgunbd.ttf) /CSI [(Korea1) 3] >> ;
+/MS-Gothic << /SubfontID 0 /FileType /TrueType /Path (C:/WINDOWS/Fonts/msgothic.ttc) /CSI [(Japan1) 3] >> ;
+/MS-UI-Gothic << /SubfontID 2 /FileType /TrueType /Path (C:/WINDOWS/Fonts/msgothic.ttc) /CSI [(Japan1) 3] >> ;
+/ArialUnicodeMS-KR << /SubfontID 0 /FileType /TrueType /Path (C:/WINDOWS/Fonts/arialuni.ttf) /CSI [(Korea1) 3] >> ;
+
+% Aliases
+/STSong-Light /SimSun ;
+/MKai-Medium /ArialUnicodeMS-CNS ;
+/AdobeSongStd-Light /SimSun ;
+/HeiseiMin-W3 /ArialUnicodeMS-JP ;
+/HYRGoThic-Medium /ArialUnicodeMS-KR ;
+/KozMinPr6N-Regular /ArialUnicodeMS-JP ;
+/Ryumin-Medium /ArialUnicodeMS-JP ;
+/STHeiti-Regular /ArialUnicodeMS-GB ;
+/Ryumin-Light /ArialUnicodeMS-JP ;
+/STKaiti-Regular /ArialUnicodeMS-GB ;
+/STFangsong-Light /SimSun ;
+/MSung-Medium /ArialUnicodeMS-CNS ;
+/GothicBBB-Medium /MS-Gothic ;
+/HYSMyeongJo-Medium /ArialUnicodeMS-KR ;
+/HYGoThic-Medium /ArialUnicodeMS-KR ;
+/HeiseiKakuGo-W5 /MS-Gothic ;
+/MHei-Medium /ArialUnicodeMS-CNS ;
+/AdobeMingStd-Light /ArialUnicodeMS-CNS ;
+/AdobeMyungjoStd-Medium /ArialUnicodeMS-KR ;
+/AdobeHeitiStd-Regular /ArialUnicodeMS-GB ;
+/MSung-Light /ArialUnicodeMS-CNS ;
