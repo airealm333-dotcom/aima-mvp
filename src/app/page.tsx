@@ -37,6 +37,12 @@ type IntakeResponse = {
     duplicateOfDrid?: string | null;
     reason: string;
   };
+  entitySummary?: {
+    client_name: string | null;
+    company_name: string | null;
+    claimant_email: string | null;
+    respondent_email: string | null;
+  } | null;
   error?: string;
   detail?: string;
 };
@@ -495,70 +501,132 @@ export default function Home() {
       ) : null}
 
       {manualIntakeEnabled && result ? (
-        <section className="grid gap-3 rounded-lg border border-emerald-300 bg-emerald-50 p-4 text-sm dark:border-emerald-900 dark:bg-emerald-950/30">
-          <div>
-            <strong>MRID:</strong> {result.mrid}
+        <section className="grid gap-4 rounded-lg border border-emerald-300 bg-emerald-50 p-4 text-sm dark:border-emerald-900 dark:bg-emerald-950/30">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0 flex-1">
+              <h2 className="text-lg font-semibold text-emerald-900 dark:text-emerald-100">
+                Testing result
+              </h2>
+              <p
+                className="mt-1 break-all font-medium text-zinc-900 dark:text-zinc-100"
+                title={result.file.name}
+              >
+                {result.file.name}
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                className="rounded border border-zinc-300 bg-white px-3 py-1.5 text-sm dark:border-zinc-600 dark:bg-zinc-900"
+                disabled={openingDocId === result.documentId}
+                onClick={() => void openReviewDocument(result.documentId)}
+              >
+                {openingDocId === result.documentId
+                  ? "Opening…"
+                  : "View document"}
+              </button>
+              <button
+                type="button"
+                className="rounded border border-zinc-300 bg-white px-3 py-1.5 text-sm dark:border-zinc-600 dark:bg-zinc-900"
+                onClick={() => {
+                  setResult(null);
+                  setError(null);
+                }}
+              >
+                Close
+              </button>
+            </div>
           </div>
-          <div>
-            <strong>DRID:</strong> {result.drid}
-          </div>
-          <div>
-            <strong>Mail Item ID:</strong> {result.mailItemId}
-          </div>
-          <div>
-            <strong>Document ID:</strong> {result.documentId}
-          </div>
-          <div>
-            <strong>Status:</strong> {result.status.mailItem} /{" "}
-            {result.status.document}
-          </div>
-          {result.classification ? (
-            <div className="space-y-1">
+
+          {result.entitySummary ? (
+            <div className="grid gap-1.5 rounded border border-emerald-200/80 bg-white/80 p-3 text-zinc-800 dark:border-emerald-800/50 dark:bg-zinc-950/40 dark:text-zinc-200">
               <div>
-                <strong>Classification:</strong> {result.classification.label} (
-                {result.classification.confidence}% via{" "}
-                {result.classification.method})
+                <strong>Client:</strong>{" "}
+                {result.entitySummary.client_name ?? "—"}
               </div>
-              <div className="text-zinc-700 dark:text-zinc-300">
-                {result.classification.rationale}
+              <div>
+                <strong>Company:</strong>{" "}
+                {result.entitySummary.company_name ?? "—"}
+              </div>
+              <div>
+                <strong>Claimant email:</strong>{" "}
+                {result.entitySummary.claimant_email ?? "—"}
+              </div>
+              <div>
+                <strong>Respondent email:</strong>{" "}
+                {result.entitySummary.respondent_email ?? "—"}
               </div>
             </div>
           ) : null}
-          {result.duplicate ? (
-            <div className="rounded border border-amber-300 bg-amber-50 p-2 text-amber-900 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-200">
-              <strong>Duplicate:</strong>{" "}
-              {result.duplicate.duplicateOfDrid
-                ? `same content as ${result.duplicate.duplicateOfDrid}`
-                : `same content as document ${result.duplicate.duplicateOfDocumentId}`}{" "}
-              ({result.duplicate.reason})
-            </div>
-          ) : null}
-          {result.flags?.lowTextCoverage ? (
-            <div>
-              <strong>Warning:</strong> Low OCR text coverage, exception queued.
-            </div>
-          ) : null}
-          <div>
-            <strong>SHA256:</strong> {result.file.sha256}
-          </div>
+
           {result.ocr ? (
-            <>
-              <div>
-                <strong>Pages:</strong> {result.ocr.pageCount} |{" "}
-                <strong>Text length:</strong> {result.ocr.textLength}
+            <div className="grid gap-2">
+              <div className="text-zinc-600 dark:text-zinc-400">
+                <strong>OCR</strong> · {result.ocr.pageCount} page(s) ·{" "}
+                {result.ocr.textLength} chars · {result.ocr.provider}
               </div>
-              <div>
-                <strong>OCR Provider:</strong> {result.ocr.provider}
-              </div>
-              <div className="max-h-56 overflow-auto rounded border border-zinc-300 bg-white p-3 font-mono text-xs dark:border-zinc-700 dark:bg-zinc-900">
+              <div className="max-h-40 overflow-auto rounded border border-zinc-300 bg-white p-3 font-mono text-xs leading-relaxed dark:border-zinc-700 dark:bg-zinc-900">
                 {result.ocr.text || "(No text extracted)"}
               </div>
-            </>
+            </div>
           ) : (
             <div className="text-zinc-600 dark:text-zinc-400">
               OCR/classification reused from canonical duplicate document.
             </div>
           )}
+
+          <details className="rounded border border-zinc-200 bg-white/60 p-3 dark:border-zinc-700 dark:bg-zinc-950/30">
+            <summary className="cursor-pointer font-medium text-zinc-800 dark:text-zinc-200">
+              Audit IDs &amp; classification
+            </summary>
+            <div className="mt-3 grid gap-2 text-zinc-700 dark:text-zinc-300">
+              <div>
+                <strong>MRID:</strong> {result.mrid}
+              </div>
+              <div>
+                <strong>DRID:</strong> {result.drid}
+              </div>
+              <div>
+                <strong>Mail Item ID:</strong> {result.mailItemId}
+              </div>
+              <div>
+                <strong>Document ID:</strong> {result.documentId}
+              </div>
+              <div>
+                <strong>Status:</strong> {result.status.mailItem} /{" "}
+                {result.status.document}
+              </div>
+              {result.classification ? (
+                <div className="space-y-1">
+                  <div>
+                    <strong>Classification:</strong>{" "}
+                    {result.classification.label} (
+                    {result.classification.confidence}% via{" "}
+                    {result.classification.method})
+                  </div>
+                  <div>{result.classification.rationale}</div>
+                </div>
+              ) : null}
+              {result.duplicate ? (
+                <div className="rounded border border-amber-300 bg-amber-50 p-2 text-amber-900 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-200">
+                  <strong>Duplicate:</strong>{" "}
+                  {result.duplicate.duplicateOfDrid
+                    ? `same content as ${result.duplicate.duplicateOfDrid}`
+                    : `same content as document ${result.duplicate.duplicateOfDocumentId}`}{" "}
+                  ({result.duplicate.reason})
+                </div>
+              ) : null}
+              {result.flags?.lowTextCoverage ? (
+                <div>
+                  <strong>Warning:</strong> Low OCR text coverage, exception
+                  queued.
+                </div>
+              ) : null}
+              <div>
+                <strong>SHA256:</strong> {result.file.sha256}
+              </div>
+            </div>
+          </details>
         </section>
       ) : null}
 

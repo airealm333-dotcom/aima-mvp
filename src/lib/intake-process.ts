@@ -3,13 +3,69 @@ import {
   type ClassificationLabel,
   classifyDocumentFromOcr,
 } from "@/lib/document-classify";
-import { extractDocumentEntitiesFromOcrText } from "@/lib/document-entities";
+import {
+  extractDocumentEntitiesFromOcrText,
+  type ExtractedEntitiesResult,
+} from "@/lib/document-entities";
 import { buildDrid, buildMrid } from "@/lib/mail-id";
 import type { OcrResult } from "@/lib/ocr";
 import { extractPdfText } from "@/lib/ocr";
 import type { SupabaseAdminBundle } from "@/lib/supabase-admin";
 
 const OCR_MIN_TEXT_LENGTH = 30;
+
+/** Flattened for manual-upload testing panel (client = individual, company = counterpart). */
+export type IntakeEntitySummary = {
+  client_name: string | null;
+  company_name: string | null;
+  claimant_email: string | null;
+  respondent_email: string | null;
+};
+
+function buildEntitySummaryFromExtracted(
+  extracted: ExtractedEntitiesResult,
+): IntakeEntitySummary {
+  const legal = extracted.legal;
+  const universal = extracted.universal;
+  const invoice = extracted.invoice;
+  return {
+    client_name:
+      legal?.claimant_name?.value ??
+      universal?.sender?.value ??
+      invoice?.buyer_name?.value ??
+      null,
+    company_name:
+      legal?.respondent_name?.value ??
+      invoice?.vendor_name?.value ??
+      universal?.addressee?.value ??
+      null,
+    claimant_email: legal?.claimant_email?.value ?? null,
+    respondent_email: legal?.respondent_email?.value ?? null,
+  };
+}
+
+function buildEntitySummaryFromDbRows(
+  rows: Array<Record<string, unknown>>,
+): IntakeEntitySummary {
+  const legal = rows.find((r) => r.entity_type === "legal_core");
+  const universal = rows.find((r) => r.entity_type === "universal_minimal");
+  const invoice = rows.find((r) => r.entity_type === "invoice_core");
+  const s = (v: unknown) => (typeof v === "string" ? v : null);
+  return {
+    client_name:
+      s(legal?.claimant_name) ??
+      s(universal?.sender) ??
+      s(invoice?.buyer_name) ??
+      null,
+    company_name:
+      s(legal?.respondent_name) ??
+      s(invoice?.vendor_name) ??
+      s(universal?.addressee) ??
+      null,
+    claimant_email: s(legal?.claimant_email),
+    respondent_email: s(legal?.respondent_email),
+  };
+}
 type LooseSupabaseClient = {
   // biome-ignore lint/suspicious/noExplicitAny: Supabase client is untyped; table queries need a loose chain.
   from: (table: string) => any;
@@ -89,6 +145,7 @@ export type ProcessIntakeSuccessBody = {
     duplicateOfDrid?: string | null;
     reason: string;
   };
+  entitySummary?: IntakeEntitySummary | null;
 };
 
 export type ProcessIntakeResult =
@@ -591,6 +648,23 @@ export async function processIntakeDocument(
       // Non-fatal: missing table or query errors should not break intake.
     }
 
+    let duplicateEntitySummary: IntakeEntitySummary | null = null;
+    try {
+      const ent = await db
+        .from("document_entities")
+        .select(
+          "entity_type, claimant_name, respondent_name, claimant_email, respondent_email, sender, vendor_name, buyer_name, addressee",
+        )
+        .eq("document_id", documentId);
+      if (!ent.error && ent.data?.length) {
+        duplicateEntitySummary = buildEntitySummaryFromDbRows(
+          ent.data as Array<Record<string, unknown>>,
+        );
+      }
+    } catch {
+      // Non-fatal
+    }
+
     return {
       ok: true,
       status: 200,
@@ -631,6 +705,7 @@ export async function processIntakeDocument(
           duplicateOfDrid: canonicalDocument.drid,
           reason: "sha256_match",
         },
+        entitySummary: duplicateEntitySummary,
       },
     };
   }
@@ -828,11 +903,14 @@ export async function processIntakeDocument(
   }
 
   // D2.5 Entity extraction (best-effort, non-fatal).
+  let entitySummary: IntakeEntitySummary | null = null;
   try {
     const extracted = extractDocumentEntitiesFromOcrText(
       ocr.text,
       classification.label,
     );
+
+    entitySummary = buildEntitySummaryFromExtracted(extracted);
 
     const universalHasAnyFields =
       extracted.universal && Object.keys(extracted.universal).length > 0;
@@ -1005,6 +1083,7 @@ export async function processIntakeDocument(
         method: classification.method,
         rationale: classification.rationale,
       },
+      entitySummary,
     },
   };
 }
