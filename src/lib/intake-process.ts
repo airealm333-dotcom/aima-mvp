@@ -4,9 +4,12 @@ import {
   classifyDocumentFromOcr,
 } from "@/lib/document-classify";
 import {
-  extractDocumentEntitiesFromOcrText,
-  type ExtractedEntitiesResult,
-} from "@/lib/document-entities";
+  extractEntitiesWithLlm,
+  mergeEntityRows,
+  rowHasExtractableFields,
+  UNIVERSAL_PROTECTED_KEYS,
+} from "@/lib/entity-extraction-llm";
+import { extractDocumentEntitiesFromOcrText } from "@/lib/document-entities";
 import { buildDrid, buildMrid } from "@/lib/mail-id";
 import type { OcrResult } from "@/lib/ocr";
 import { extractPdfText } from "@/lib/ocr";
@@ -22,25 +25,28 @@ export type IntakeEntitySummary = {
   respondent_email: string | null;
 };
 
-function buildEntitySummaryFromExtracted(
-  extracted: ExtractedEntitiesResult,
+function strField(v: unknown): string | null {
+  return typeof v === "string" && v.trim() ? v : null;
+}
+
+/** Intake API summary after rule + optional LLM merge (matches DB row shape). */
+function buildEntitySummaryFromDbRows(
+  universal: Record<string, unknown>,
+  legal: Record<string, unknown>,
+  invoice: Record<string, unknown>,
 ): IntakeEntitySummary {
-  const legal = extracted.legal;
-  const universal = extracted.universal;
-  const invoice = extracted.invoice;
   return {
     client_name:
-      legal?.claimant_name?.value ??
-      universal?.sender?.value ??
-      invoice?.buyer_name?.value ??
+      strField(legal.claimant_name) ??
+      strField(universal.sender_name) ??
+      strField(invoice.account_name) ??
       null,
     company_name:
-      legal?.respondent_name?.value ??
-      invoice?.vendor_name?.value ??
-      universal?.addressee?.value ??
+      strField(legal.respondent_name) ??
+      strField(universal.recipient_name) ??
       null,
-    claimant_email: legal?.claimant_email?.value ?? null,
-    respondent_email: legal?.respondent_email?.value ?? null,
+    claimant_email: strField(legal.claimant_email),
+    respondent_email: strField(legal.respondent_email),
   };
 }
 
@@ -929,12 +935,10 @@ export async function processIntakeDocument(
       classification.label,
     );
 
-    entitySummary = buildEntitySummaryFromExtracted(extracted);
-
     const docTypeForRow =
       extracted.universal.document_type?.value ?? classification.label;
 
-    const universalRow = {
+    const universalRow: Record<string, unknown> = {
       document_id: documentId,
       drid,
       mrid,
@@ -954,6 +958,104 @@ export async function processIntakeDocument(
       original_pdf_path: storagePath,
     };
 
+    const ruleLegal =
+      Boolean(extracted.legal) &&
+      extracted.legalPresent &&
+      extracted.legalConfidence > 0;
+
+    const legalRow: Record<string, unknown> = ruleLegal
+      ? {
+          document_id: documentId,
+          case_number: extracted.legal?.case_number?.value ?? null,
+          court_name: extracted.legal?.authority?.value ?? null,
+          claimant_name: extracted.legal?.claimant_name?.value ?? null,
+          claimant_email: extracted.legal?.claimant_email?.value ?? null,
+          respondent_name: extracted.legal?.respondent_name?.value ?? null,
+          respondent_email: extracted.legal?.respondent_email?.value ?? null,
+          respondent_contact:
+            extracted.legal?.respondent_contact_name?.value ?? null,
+          employment_start_date:
+            extracted.legal?.employment_start_date?.value ?? null,
+          employment_end_date:
+            extracted.legal?.employment_end_date?.value ?? null,
+          basic_salary: parseNumericForDb(
+            extracted.legal?.basic_salary_monthly?.value,
+          ),
+          occupation: extracted.legal?.occupation?.value ?? null,
+        }
+      : { document_id: documentId };
+
+    const ruleInvoice =
+      Boolean(extracted.invoice) &&
+      extracted.invoicePresent &&
+      extracted.invoiceConfidence > 0;
+
+    const invoiceRow: Record<string, unknown> = ruleInvoice
+      ? {
+          document_id: documentId,
+          bill_number: extracted.invoice?.invoice_number?.value ?? null,
+          bill_date: extracted.invoice?.invoice_date?.value ?? null,
+          due_date: extracted.invoice?.due_date?.value ?? null,
+          currency: extracted.invoice?.currency?.value ?? "SGD",
+          gst_amount: parseNumericForDb(extracted.invoice?.tax_amount?.value),
+          total_amount_due: parseNumericForDb(
+            extracted.invoice?.total_amount?.value,
+          ),
+          account_name:
+            extracted.invoice?.vendor_name?.value ??
+            extracted.invoice?.buyer_name?.value ??
+            null,
+          service_type: extracted.invoice?.buyer_name?.value ?? null,
+        }
+      : { document_id: documentId, currency: "SGD" };
+
+    const llmOverride =
+      process.env.ENTITY_EXTRACTION_LLM_OVERRIDE === "true";
+    let entityLlmApplied = false;
+    let entityLlmFieldsFilled = 0;
+
+    try {
+      const llmBuckets = await extractEntitiesWithLlm(
+        ocr.text,
+        classification.label,
+      );
+      if (llmBuckets) {
+        entityLlmApplied = true;
+        entityLlmFieldsFilled += mergeEntityRows(
+          universalRow,
+          llmBuckets.universal as Record<string, unknown>,
+          UNIVERSAL_PROTECTED_KEYS,
+          llmOverride,
+        );
+        entityLlmFieldsFilled += mergeEntityRows(
+          legalRow,
+          llmBuckets.legal as Record<string, unknown>,
+          new Set(["document_id"]),
+          llmOverride,
+        );
+        entityLlmFieldsFilled += mergeEntityRows(
+          invoiceRow,
+          llmBuckets.invoice as Record<string, unknown>,
+          new Set(["document_id"]),
+          llmOverride,
+        );
+      }
+    } catch {
+      await db.from("audit_logs").insert({
+        entity_type: "document",
+        entity_id: documentId,
+        action: "ENTITY_LLM_EXTRACTION_FAILED",
+        actor: "AIMA",
+        metadata: { step: "entity_extraction_llm" },
+      });
+    }
+
+    entitySummary = buildEntitySummaryFromDbRows(
+      universalRow,
+      legalRow,
+      invoiceRow,
+    );
+
     const universalUpsert = await db
       .from("universal_info")
       .upsert(universalRow, { onConflict: "document_id" });
@@ -971,30 +1073,11 @@ export async function processIntakeDocument(
       });
     }
 
-    if (
-      extracted.legal &&
-      extracted.legalPresent &&
-      extracted.legalConfidence > 0
-    ) {
-      const legalRow = {
-        document_id: documentId,
-        case_number: extracted.legal.case_number?.value ?? null,
-        court_name: extracted.legal.authority?.value ?? null,
-        claimant_name: extracted.legal.claimant_name?.value ?? null,
-        claimant_email: extracted.legal.claimant_email?.value ?? null,
-        respondent_name: extracted.legal.respondent_name?.value ?? null,
-        respondent_email: extracted.legal.respondent_email?.value ?? null,
-        respondent_contact:
-          extracted.legal.respondent_contact_name?.value ?? null,
-        employment_start_date:
-          extracted.legal.employment_start_date?.value ?? null,
-        employment_end_date:
-          extracted.legal.employment_end_date?.value ?? null,
-        basic_salary: parseNumericForDb(
-          extracted.legal.basic_salary_monthly?.value,
-        ),
-        occupation: extracted.legal.occupation?.value ?? null,
-      };
+    const shouldUpsertLegal =
+      ruleLegal ||
+      rowHasExtractableFields(legalRow, ["document_id"]);
+
+    if (shouldUpsertLegal) {
       const legalUpsert = await db
         .from("legal_entities")
         .upsert(legalRow, { onConflict: "document_id" });
@@ -1012,27 +1095,11 @@ export async function processIntakeDocument(
       }
     }
 
-    if (
-      extracted.invoice &&
-      extracted.invoicePresent &&
-      extracted.invoiceConfidence > 0
-    ) {
-      const invoiceRow = {
-        document_id: documentId,
-        bill_number: extracted.invoice.invoice_number?.value ?? null,
-        bill_date: extracted.invoice.invoice_date?.value ?? null,
-        due_date: extracted.invoice.due_date?.value ?? null,
-        currency: extracted.invoice.currency?.value ?? "SGD",
-        gst_amount: parseNumericForDb(extracted.invoice.tax_amount?.value),
-        total_amount_due: parseNumericForDb(
-          extracted.invoice.total_amount?.value,
-        ),
-        account_name:
-          extracted.invoice.vendor_name?.value ??
-          extracted.invoice.buyer_name?.value ??
-          null,
-        service_type: extracted.invoice.buyer_name?.value ?? null,
-      };
+    const shouldUpsertInvoice =
+      ruleInvoice ||
+      rowHasExtractableFields(invoiceRow, ["document_id", "currency"]);
+
+    if (shouldUpsertInvoice) {
       const invoiceUpsert = await db
         .from("invoice_entities")
         .upsert(invoiceRow, { onConflict: "document_id" });
@@ -1062,6 +1129,8 @@ export async function processIntakeDocument(
           invoicePresent: extracted.invoicePresent,
           legalConfidence: extracted.legalConfidence,
           legalPresent: extracted.legalPresent,
+          entityLlmApplied,
+          entityLlmFieldsFilled,
         },
       });
     }

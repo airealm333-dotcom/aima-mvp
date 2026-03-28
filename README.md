@@ -60,7 +60,9 @@ This repo includes an MVP intake flow through OCR and **D2 document classificati
 6. Optionally set `GOOGLE_VISION_STRICT=true` to fail fast when Vision/GCS OCR is unavailable.
 7. **Supabase — classification columns:** Run the SQL in the [Supabase: documents classification columns](#supabase-documents-classification-columns) section (or paste [`sql/documents_classification_columns.sql`](sql/documents_classification_columns.sql)) in the Supabase SQL editor so intake can set `D2_CLASSIFIED` and store classification fields.
 8. Configure Gmail intake (see `.env.example`): `CRON_SECRET` (required for the HTTP cron route and for Vercel Cron) plus either OAuth client + refresh token **or** Workspace service account + delegated user. Create Gmail labels matching `GMAIL_INTAKE_LABEL_UNPROCESSED` / `GMAIL_INTAKE_LABEL_PROCESSED` (or let the first poll create them).
-9. Optional classification LLM: set `ANTHROPIC_API_KEY`, `CLASSIFICATION_USE_LLM=true`, and optionally `CLASSIFICATION_LLM_THRESHOLD` (default `90` — rules confidence must be below this to call the model). See `.env.example`.
+9. Optional Anthropic LLMs (same `ANTHROPIC_API_KEY`):
+   - **Classification (D2):** `CLASSIFICATION_USE_LLM=true`, optionally `CLASSIFICATION_LLM_THRESHOLD` (default `90` — rules confidence must be below this to call the model).
+   - **Entity extraction (D2.5):** `ENTITY_EXTRACTION_USE_LLM=true` to merge structured fields into `universal_info` / `legal_entities` / `invoice_entities` after rule extraction; optionally `ANTHROPIC_ENTITY_MODEL`, `ENTITY_EXTRACTION_OCR_MAX_CHARS`, `ENTITY_EXTRACTION_LLM_OVERRIDE`. See `.env.example`.
 10. Optional: set `GMAIL_AUTOPOLL_INTERVAL_MS=300000` in `.env.local` to poll Gmail every 5 minutes automatically while `npm run dev` or `npm run start` is running (do not rely on this on Vercel; use the included `vercel.json` cron instead).
 11. Run `npm run dev`.
 
