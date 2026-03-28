@@ -12,6 +12,8 @@ create table if not exists public.universal_info (
   mrid text not null,
   full_text text,
   recipient_name text,
+  organization_name text,
+  contact_person_name text,
   recipient_uen text,
   recipient_address text,
   sender_name text,

@@ -6,6 +6,10 @@ export type EntityField = {
 export type UniversalMinimalEntities = {
   sender?: EntityField;
   addressee?: EntityField;
+  /** Client company / legal entity (letterhead, PTE LTD line, etc.). */
+  organization_name?: EntityField;
+  /** Named individual when Attn/Attention/Dear line matches. */
+  contact_person_name?: EntityField;
   reference_number?: EntityField;
   document_date?: EntityField;
   document_type?: EntityField;
@@ -324,6 +328,46 @@ function extractVendorBuyer(text: string, lines: string[]) {
   return { sender, buyer: addressee };
 }
 
+function extractContactPersonFromAttn(rawLines: string[]): EntityField | undefined {
+  for (const line of rawLines.slice(0, 45)) {
+    const attn = line.match(
+      /^\s*(?:ATTN|ATTENTION|ATT\.?\s*N)\s*[:\-.]\s*(.+)$/i,
+    );
+    if (attn?.[1]) {
+      const v = attn[1].trim();
+      if (v.length >= 2 && v.length < 160) {
+        return { value: v.replace(/\s+/g, " "), confidence: 78 };
+      }
+    }
+    const dear = line.match(
+      /^\s*DEAR\s+(?:MR\.?|MS\.?|MRS\.?|DR\.?|PROF\.?)?\s*([A-Za-z][A-Za-z'.-]+(?:\s+[A-Za-z][A-Za-z'.-]+){0,5})\s*[,:]/i,
+    );
+    if (dear?.[1]) {
+      const v = dear[1].trim();
+      if (v.length >= 2 && v.length < 120) {
+        return { value: v.replace(/\s+/g, " "), confidence: 62 };
+      }
+    }
+  }
+  return undefined;
+}
+
+function extractOrganizationFromLines(rawLines: string[]): EntityField | undefined {
+  const orgPattern =
+    /\b(PTE\.?\s*LTD|PTE\s+LTD|LTD\.?|LIMITED|LLP|LLC|INC\.?|CORP\.?|SDN\.?\s*BHD|BERHAD|CO\.\s*,\s*REG)\b/i;
+  for (let i = 0; i < Math.min(rawLines.length, 28); i++) {
+    const line = rawLines[i];
+    if (!line || line.length < 6 || line.length > 220) continue;
+    if (orgPattern.test(line)) {
+      const cleaned = line.replace(/^\d+[\).\s]+/, "").trim();
+      if (cleaned.length >= 6) {
+        return { value: cleaned, confidence: 72 };
+      }
+    }
+  }
+  return undefined;
+}
+
 function findClaimantRespondentHeaderIndices(upperLines: string[]): {
   claimantHeaderIdx: number;
   respondentHeaderIdx: number;
@@ -550,6 +594,11 @@ export function extractDocumentEntitiesFromOcrText(
   if (sender) universal.sender = sender;
   if (buyer) universal.addressee = buyer;
 
+  const contactPerson = extractContactPersonFromAttn(rawLines);
+  if (contactPerson) universal.contact_person_name = contactPerson;
+  const orgFromLine = extractOrganizationFromLines(rawLines);
+  if (orgFromLine) universal.organization_name = orgFromLine;
+
   // Document date: often "DATE" or first date in doc.
   const documentDate = findDateNearKeyword(
     normalizedText,
@@ -560,6 +609,8 @@ export function extractDocumentEntitiesFromOcrText(
   const universalConfidence = averageConfidence([
     universal.sender,
     universal.addressee,
+    universal.organization_name,
+    universal.contact_person_name,
     universal.reference_number,
     universal.document_date,
     universal.document_type,

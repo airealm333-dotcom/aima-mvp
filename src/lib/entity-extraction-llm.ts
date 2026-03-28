@@ -4,6 +4,8 @@ import type { ClassificationLabel } from "@/lib/document-classify";
 /** Keys the LLM may return for universal_info (pipeline-owned keys are never applied from LLM). */
 export const UNIVERSAL_LLM_KEYS = [
   "recipient_name",
+  "organization_name",
+  "contact_person_name",
   "recipient_uen",
   "recipient_address",
   "sender_name",
@@ -323,6 +325,21 @@ export function rowHasExtractableFields(
   return false;
 }
 
+/** Count non-empty values across universal / legal / invoice buckets (post-normalization). */
+export function countLlmBucketValues(buckets: LlmEntityBuckets): number {
+  let n = 0;
+  for (const bucket of [
+    buckets.universal,
+    buckets.legal,
+    buckets.invoice,
+  ] as const) {
+    for (const v of Object.values(bucket)) {
+      if (!isEmptyEntityValue(v)) n += 1;
+    }
+  }
+  return n;
+}
+
 /**
  * Merges LLM partial into base row. Returns number of keys applied from LLM (for audit).
  */
@@ -378,6 +395,11 @@ export async function extractEntitiesWithLlm(
 
   const userMsg = `You extract structured data from registered-office mail OCR. The document was classified as: ${classificationLabel}.
 
+Semantic field meanings (universal):
+- recipient_name / sender_name: directional — who the mail is addressed TO on the envelope or "TO:" block vs who ISSUED it (letterhead / "FROM:" / government agency).
+- organization_name: the client COMPANY or legal entity the matter concerns (often the addressee company or name after "Re:", UEN block, or registered-office client). Use null if only a person is named with no clear entity.
+- contact_person_name: a natural PERSON only when explicitly labeled (e.g. Attn:, Attention:, Dear Mr/Ms, signatory line). Use null if unclear or not present.
+
 Rules:
 - Use ONLY information clearly present in the OCR. If a field is not in the text, use null.
 - Do not invent UENs, amounts, dates, or names.
@@ -405,6 +427,10 @@ ${excerpt}
 
   const block = resp.content[0];
   const text = block?.type === "text" ? block.text : "";
+  const trimmed = text.trim();
   const parsed = parseRawLlmJson(text);
+  if (trimmed.length > 0 && parsed == null) {
+    throw new Error("ENTITY_LLM_JSON_PARSE_FAILED");
+  }
   return normalizeLlmPayload(parsed);
 }

@@ -47,6 +47,25 @@ type IntakeResponse = {
   detail?: string;
 };
 
+type ManualIntakeSplitResponse = {
+  split: true;
+  sourceFileName: string;
+  documents: IntakeResponse[];
+  errors?: Array<{ chunkIndex: number; status: number; detail: string }>;
+};
+
+function isManualIntakeSplitPayload(
+  v: unknown,
+): v is ManualIntakeSplitResponse {
+  if (typeof v !== "object" || v === null) return false;
+  const o = v as Record<string, unknown>;
+  return (
+    o.split === true &&
+    typeof o.sourceFileName === "string" &&
+    Array.isArray(o.documents)
+  );
+}
+
 type RecentDocument = {
   id: string;
   drid: string;
@@ -79,6 +98,8 @@ type RecentDocument = {
   // D2.5: extracted entity fields (best-effort OCR -> rule-first extraction).
   entity_sender?: string | null;
   entity_addressee?: string | null;
+  entity_organization_name?: string | null;
+  entity_contact_person_name?: string | null;
   entity_reference_number?: string | null;
   entity_document_date?: string | null;
   entity_document_type?: string | null;
@@ -107,6 +128,30 @@ type RecentDocument = {
   entity_occupation?: string | null;
   entity_basic_salary_monthly?: string | null;
 };
+
+function pickUploadDetail(
+  items: RecentDocument[],
+  documentId: string,
+): RecentDocument | undefined {
+  return items.find((d) => d.id === documentId);
+}
+
+function hasInvoiceEntityFields(doc: RecentDocument | undefined): boolean {
+  if (!doc) return false;
+  const keys = [
+    "entity_invoice_number",
+    "entity_invoice_date",
+    "entity_due_date",
+    "entity_total_amount",
+    "entity_tax_amount",
+    "entity_currency",
+    "entity_vendor_name",
+  ] as const;
+  return keys.some((k) => {
+    const v = doc[k];
+    return v != null && String(v).trim() !== "";
+  });
+}
 
 type OpenException = {
   id: string;
@@ -177,7 +222,11 @@ export default function Home() {
   const [envelopeCondition, setEnvelopeCondition] = useState("sealed");
   const [file, setFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<IntakeResponse | null>(null);
+  const [uploadResults, setUploadResults] = useState<IntakeResponse[]>([]);
+  const [splitUploadInfo, setSplitUploadInfo] = useState<{
+    sourceFileName: string;
+    errors: Array<{ chunkIndex: number; status: number; detail: string }>;
+  } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [sidebarError, setSidebarError] = useState<string | null>(null);
   const [gmailCountError, setGmailCountError] = useState<string | null>(null);
@@ -328,7 +377,8 @@ export default function Home() {
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError(null);
-    setResult(null);
+    setUploadResults([]);
+    setSplitUploadInfo(null);
 
     if (!file) {
       setError("Please choose a PDF or image file.");
@@ -351,10 +401,11 @@ export default function Home() {
         body: formData,
       });
 
-      const json = (await response.json()) as IntakeResponse;
+      const json: unknown = await response.json();
       if (!response.ok) {
-        const detail = json.detail?.trim();
-        const err = json.error?.trim();
+        const j = json as { detail?: string; error?: string };
+        const detail = j.detail?.trim();
+        const err = j.error?.trim();
         const msg =
           detail && err && detail !== err
             ? `${err}: ${detail}`
@@ -363,7 +414,16 @@ export default function Home() {
         return;
       }
 
-      setResult(json);
+      if (isManualIntakeSplitPayload(json)) {
+        setUploadResults(json.documents);
+        setSplitUploadInfo({
+          sourceFileName: json.sourceFileName,
+          errors: json.errors ?? [],
+        });
+      } else {
+        setUploadResults([json as IntakeResponse]);
+        setSplitUploadInfo(null);
+      }
       await loadRecentDocuments();
       await loadOpenExceptions();
     } catch (submitError) {
@@ -500,133 +560,278 @@ export default function Home() {
         </div>
       ) : null}
 
-      {manualIntakeEnabled && result ? (
+      {manualIntakeEnabled && uploadResults.length > 0 ? (
         <section className="grid gap-4 rounded-lg border border-emerald-300 bg-emerald-50 p-4 text-sm dark:border-emerald-900 dark:bg-emerald-950/30">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="min-w-0 flex-1">
               <h2 className="text-lg font-semibold text-emerald-900 dark:text-emerald-100">
-                Testing result
+                Results
               </h2>
-              <p
-                className="mt-1 break-all font-medium text-zinc-900 dark:text-zinc-100"
-                title={result.file.name}
-              >
-                {result.file.name}
-              </p>
+              {splitUploadInfo ? (
+                <p className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">
+                  PDF split from{" "}
+                  <strong className="break-all">
+                    {splitUploadInfo.sourceFileName}
+                  </strong>{" "}
+                  · {uploadResults.length} segment(s) ingested.
+                </p>
+              ) : null}
+              {splitUploadInfo && splitUploadInfo.errors.length > 0 ? (
+                <div className="mt-2 rounded border border-amber-300 bg-amber-50 p-2 text-xs text-amber-900 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-200">
+                  <strong>Some segments failed:</strong>
+                  <ul className="mt-1 list-inside list-disc">
+                    {splitUploadInfo.errors.map((e) => (
+                      <li key={e.chunkIndex}>
+                        Chunk {e.chunkIndex} (HTTP {e.status}):{" "}
+                        {e.detail.length > 240
+                          ? `${e.detail.slice(0, 240)}…`
+                          : e.detail}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
             </div>
-            <div className="flex flex-wrap gap-2">
-              <button
-                type="button"
-                className="rounded border border-zinc-300 bg-white px-3 py-1.5 text-sm dark:border-zinc-600 dark:bg-zinc-900"
-                disabled={openingDocId === result.documentId}
-                onClick={() => void openReviewDocument(result.documentId)}
-              >
-                {openingDocId === result.documentId
-                  ? "Opening…"
-                  : "View document"}
-              </button>
-              <button
-                type="button"
-                className="rounded border border-zinc-300 bg-white px-3 py-1.5 text-sm dark:border-zinc-600 dark:bg-zinc-900"
-                onClick={() => {
-                  setResult(null);
-                  setError(null);
-                }}
-              >
-                Close
-              </button>
-            </div>
+            <button
+              type="button"
+              className="rounded border border-zinc-300 bg-white px-3 py-1.5 text-sm dark:border-zinc-600 dark:bg-zinc-900"
+              onClick={() => {
+                setUploadResults([]);
+                setSplitUploadInfo(null);
+                setError(null);
+              }}
+            >
+              Close
+            </button>
           </div>
 
-          {result.entitySummary ? (
-            <div className="grid gap-1.5 rounded border border-emerald-200/80 bg-white/80 p-3 text-zinc-800 dark:border-emerald-800/50 dark:bg-zinc-950/40 dark:text-zinc-200">
-              <div>
-                <strong>Client:</strong>{" "}
-                {result.entitySummary.client_name ?? "—"}
-              </div>
-              <div>
-                <strong>Company:</strong>{" "}
-                {result.entitySummary.company_name ?? "—"}
-              </div>
-              <div>
-                <strong>Claimant email:</strong>{" "}
-                {result.entitySummary.claimant_email ?? "—"}
-              </div>
-              <div>
-                <strong>Respondent email:</strong>{" "}
-                {result.entitySummary.respondent_email ?? "—"}
-              </div>
-            </div>
-          ) : null}
-
-          {result.ocr ? (
-            <div className="grid gap-2">
-              <div className="text-zinc-600 dark:text-zinc-400">
-                <strong>OCR</strong> · {result.ocr.pageCount} page(s) ·{" "}
-                {result.ocr.textLength} chars · {result.ocr.provider}
-              </div>
-              <div className="max-h-40 overflow-auto rounded border border-zinc-300 bg-white p-3 font-mono text-xs leading-relaxed dark:border-zinc-700 dark:bg-zinc-900">
-                {result.ocr.text || "(No text extracted)"}
-              </div>
-            </div>
-          ) : (
-            <div className="text-zinc-600 dark:text-zinc-400">
-              OCR/classification reused from canonical duplicate document.
-            </div>
-          )}
-
-          <details className="rounded border border-zinc-200 bg-white/60 p-3 dark:border-zinc-700 dark:bg-zinc-950/30">
-            <summary className="cursor-pointer font-medium text-zinc-800 dark:text-zinc-200">
-              Audit IDs &amp; classification
-            </summary>
-            <div className="mt-3 grid gap-2 text-zinc-700 dark:text-zinc-300">
-              <div>
-                <strong>MRID:</strong> {result.mrid}
-              </div>
-              <div>
-                <strong>DRID:</strong> {result.drid}
-              </div>
-              <div>
-                <strong>Mail Item ID:</strong> {result.mailItemId}
-              </div>
-              <div>
-                <strong>Document ID:</strong> {result.documentId}
-              </div>
-              <div>
-                <strong>Status:</strong> {result.status.mailItem} /{" "}
-                {result.status.document}
-              </div>
-              {result.classification ? (
-                <div className="space-y-1">
-                  <div>
-                    <strong>Classification:</strong>{" "}
-                    {result.classification.label} (
-                    {result.classification.confidence}% via{" "}
-                    {result.classification.method})
+          {uploadResults.map((result, segIdx) => {
+            const segmentDetail = pickUploadDetail(recent, result.documentId);
+            return (
+              <div
+                key={result.documentId}
+                className="grid gap-4 rounded-lg border border-emerald-200/90 bg-white/40 p-3 dark:border-emerald-800/60 dark:bg-emerald-950/25"
+              >
+                {uploadResults.length > 1 ? (
+                  <div className="text-xs font-semibold uppercase tracking-wide text-emerald-800 dark:text-emerald-200">
+                    Segment {segIdx + 1} of {uploadResults.length}
                   </div>
-                  <div>{result.classification.rationale}</div>
+                ) : null}
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="min-w-0 flex-1">
+                    <p
+                      className="break-all font-medium text-zinc-900 dark:text-zinc-100"
+                      title={result.file.name}
+                    >
+                      {result.file.name}
+                    </p>
+                    <p className="mt-0.5 text-xs text-zinc-600 dark:text-zinc-400">
+                      <strong>DRID:</strong> {result.drid}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    className="rounded border border-zinc-300 bg-white px-3 py-1.5 text-sm dark:border-zinc-600 dark:bg-zinc-900"
+                    disabled={openingDocId === result.documentId}
+                    onClick={() => void openReviewDocument(result.documentId)}
+                  >
+                    {openingDocId === result.documentId
+                      ? "Opening…"
+                      : "View document"}
+                  </button>
                 </div>
-              ) : null}
-              {result.duplicate ? (
-                <div className="rounded border border-amber-300 bg-amber-50 p-2 text-amber-900 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-200">
-                  <strong>Duplicate:</strong>{" "}
-                  {result.duplicate.duplicateOfDrid
-                    ? `same content as ${result.duplicate.duplicateOfDrid}`
-                    : `same content as document ${result.duplicate.duplicateOfDocumentId}`}{" "}
-                  ({result.duplicate.reason})
+
+                <div className="grid gap-2 rounded border border-emerald-200/80 bg-white/80 p-3 text-zinc-800 dark:border-emerald-800/50 dark:bg-zinc-950/40 dark:text-zinc-200">
+                  <div>
+                    <strong>Document type (D2):</strong>{" "}
+                    {result.classification?.label ?? "—"}
+                    {result.classification != null
+                      ? ` (${result.classification.confidence}% · ${result.classification.method})`
+                      : null}
+                  </div>
+                  {segmentDetail?.entity_document_type &&
+                  segmentDetail.entity_document_type !==
+                    result.classification?.label ? (
+                    <div>
+                      <strong>Extracted document type:</strong>{" "}
+                      {segmentDetail.entity_document_type}
+                    </div>
+                  ) : null}
+                  <div>
+                    <strong>Recipient (addressee):</strong>{" "}
+                    {segmentDetail?.entity_addressee ??
+                      result.entitySummary?.company_name ??
+                      "—"}
+                  </div>
+                  <div>
+                    <strong>Organization (client company):</strong>{" "}
+                    {segmentDetail?.entity_organization_name ?? "—"}
+                  </div>
+                  <div>
+                    <strong>Contact person:</strong>{" "}
+                    {segmentDetail?.entity_contact_person_name ?? "—"}
+                  </div>
+                  <div>
+                    <strong>Client / claimant:</strong>{" "}
+                    {segmentDetail?.entity_claimant_name ??
+                      result.entitySummary?.client_name ??
+                      "—"}
+                  </div>
+                  {segmentDetail?.entity_sender &&
+                  segmentDetail.entity_sender.trim() !==
+                    (
+                      segmentDetail.entity_claimant_name ??
+                      result.entitySummary?.client_name ??
+                      ""
+                    ).trim() ? (
+                    <div>
+                      <strong>Sender:</strong> {segmentDetail.entity_sender}
+                    </div>
+                  ) : null}
+                  <div>
+                    <strong>Claimant email:</strong>{" "}
+                    {segmentDetail?.entity_claimant_email ??
+                      result.entitySummary?.claimant_email ??
+                      "—"}
+                  </div>
+                  <div>
+                    <strong>Respondent email:</strong>{" "}
+                    {segmentDetail?.entity_respondent_email ??
+                      result.entitySummary?.respondent_email ??
+                      "—"}
+                  </div>
                 </div>
-              ) : null}
-              {result.flags?.lowTextCoverage ? (
-                <div>
-                  <strong>Warning:</strong> Low OCR text coverage, exception
-                  queued.
-                </div>
-              ) : null}
-              <div>
-                <strong>SHA256:</strong> {result.file.sha256}
+
+                {hasInvoiceEntityFields(segmentDetail) ? (
+                  <div className="grid gap-1.5 rounded border border-emerald-200/80 bg-white/90 p-3 dark:border-emerald-800/50 dark:bg-zinc-950/50">
+                    <div className="font-medium text-emerald-900 dark:text-emerald-100">
+                      Invoice
+                    </div>
+                    {segmentDetail?.entity_vendor_name ? (
+                      <div>
+                        <strong>Account / vendor:</strong>{" "}
+                        {segmentDetail.entity_vendor_name}
+                      </div>
+                    ) : null}
+                    {segmentDetail?.entity_invoice_number ? (
+                      <div>
+                        <strong>Bill / invoice no.:</strong>{" "}
+                        {segmentDetail.entity_invoice_number}
+                      </div>
+                    ) : null}
+                    {segmentDetail?.entity_invoice_date ? (
+                      <div>
+                        <strong>Bill date:</strong>{" "}
+                        {segmentDetail.entity_invoice_date}
+                      </div>
+                    ) : null}
+                    {segmentDetail?.entity_due_date ? (
+                      <div>
+                        <strong>Due date:</strong>{" "}
+                        {segmentDetail.entity_due_date}
+                      </div>
+                    ) : null}
+                    <div className="flex flex-wrap gap-x-4 gap-y-1">
+                      {segmentDetail?.entity_total_amount ? (
+                        <span>
+                          <strong>Total:</strong>{" "}
+                          {segmentDetail.entity_total_amount}{" "}
+                          {segmentDetail.entity_currency ?? ""}
+                        </span>
+                      ) : null}
+                      {segmentDetail?.entity_tax_amount ? (
+                        <span>
+                          <strong>GST / tax:</strong>{" "}
+                          {segmentDetail.entity_tax_amount}
+                        </span>
+                      ) : null}
+                      {segmentDetail?.entity_currency &&
+                      !segmentDetail?.entity_total_amount ? (
+                        <span>
+                          <strong>Currency:</strong>{" "}
+                          {segmentDetail.entity_currency}
+                        </span>
+                      ) : null}
+                    </div>
+                  </div>
+                ) : null}
+
+                <details className="rounded border border-zinc-200 bg-white/60 p-3 dark:border-zinc-700 dark:bg-zinc-950/30">
+                  <summary className="cursor-pointer font-medium text-zinc-800 dark:text-zinc-200">
+                    OCR text (click to expand)
+                  </summary>
+                  {result.ocr ? (
+                    <div className="mt-3 grid gap-2">
+                      <div className="text-xs text-zinc-600 dark:text-zinc-400">
+                        {result.ocr.pageCount} page(s) ·{" "}
+                        {result.ocr.textLength} chars · {result.ocr.provider}
+                      </div>
+                      <div className="max-h-64 overflow-auto rounded border border-zinc-300 bg-white p-3 font-mono text-xs leading-relaxed dark:border-zinc-700 dark:bg-zinc-900">
+                        {result.ocr.text || "(No text extracted)"}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="mt-3 text-zinc-600 dark:text-zinc-400">
+                      OCR/classification reused from canonical duplicate
+                      document.
+                    </div>
+                  )}
+                </details>
+
+                <details className="rounded border border-zinc-200 bg-white/60 p-3 dark:border-zinc-700 dark:bg-zinc-950/30">
+                  <summary className="cursor-pointer font-medium text-zinc-800 dark:text-zinc-200">
+                    Technical details (IDs, rationale, SHA256)
+                  </summary>
+                  <div className="mt-3 grid gap-2 text-zinc-700 dark:text-zinc-300">
+                    <div>
+                      <strong>MRID:</strong> {result.mrid}
+                    </div>
+                    <div>
+                      <strong>DRID:</strong> {result.drid}
+                    </div>
+                    <div>
+                      <strong>Mail Item ID:</strong> {result.mailItemId}
+                    </div>
+                    <div>
+                      <strong>Document ID:</strong> {result.documentId}
+                    </div>
+                    <div>
+                      <strong>Status:</strong> {result.status.mailItem} /{" "}
+                      {result.status.document}
+                    </div>
+                    {result.classification ? (
+                      <div className="space-y-1">
+                        <div>
+                          <strong>Classification rationale:</strong>
+                        </div>
+                        <div className="text-zinc-600 dark:text-zinc-400">
+                          {result.classification.rationale}
+                        </div>
+                      </div>
+                    ) : null}
+                    {result.duplicate ? (
+                      <div className="rounded border border-amber-300 bg-amber-50 p-2 text-amber-900 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-200">
+                        <strong>Duplicate:</strong>{" "}
+                        {result.duplicate.duplicateOfDrid
+                          ? `same content as ${result.duplicate.duplicateOfDrid}`
+                          : `same content as document ${result.duplicate.duplicateOfDocumentId}`}{" "}
+                        ({result.duplicate.reason})
+                      </div>
+                    ) : null}
+                    {result.flags?.lowTextCoverage ? (
+                      <div>
+                        <strong>Warning:</strong> Low OCR text coverage,
+                        exception queued.
+                      </div>
+                    ) : null}
+                    <div>
+                      <strong>SHA256:</strong> {result.file.sha256}
+                    </div>
+                  </div>
+                </details>
               </div>
-            </div>
-          </details>
+            );
+          })}
         </section>
       ) : null}
 

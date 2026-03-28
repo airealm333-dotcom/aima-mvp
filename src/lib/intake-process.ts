@@ -4,6 +4,7 @@ import {
   classifyDocumentFromOcr,
 } from "@/lib/document-classify";
 import {
+  countLlmBucketValues,
   extractEntitiesWithLlm,
   mergeEntityRows,
   rowHasExtractableFields,
@@ -944,6 +945,8 @@ export async function processIntakeDocument(
       mrid,
       full_text: ocr.text,
       recipient_name: extracted.universal.addressee?.value ?? null,
+      organization_name: extracted.universal.organization_name?.value ?? null,
+      contact_person_name: extracted.universal.contact_person_name?.value ?? null,
       sender_name: extracted.universal.sender?.value ?? null,
       reference_number: extracted.universal.reference_number?.value ?? null,
       document_date: extracted.universal.document_date?.value ?? null,
@@ -1013,6 +1016,7 @@ export async function processIntakeDocument(
       process.env.ENTITY_EXTRACTION_LLM_OVERRIDE === "true";
     let entityLlmApplied = false;
     let entityLlmFieldsFilled = 0;
+    let entityLlmUsableKeysBeforeMerge: number | undefined;
 
     try {
       const llmBuckets = await extractEntitiesWithLlm(
@@ -1021,6 +1025,20 @@ export async function processIntakeDocument(
       );
       if (llmBuckets) {
         entityLlmApplied = true;
+        const llmUsableKeys = countLlmBucketValues(llmBuckets);
+        entityLlmUsableKeysBeforeMerge = llmUsableKeys;
+        if (llmUsableKeys === 0) {
+          await db.from("audit_logs").insert({
+            entity_type: "document",
+            entity_id: documentId,
+            action: "ENTITY_LLM_NO_EXTRACTABLE_FIELDS",
+            actor: "AIMA",
+            metadata: {
+              step: "entity_extraction_llm",
+              hint: "Model returned JSON with no usable normalized fields after whitelist.",
+            },
+          });
+        }
         entityLlmFieldsFilled += mergeEntityRows(
           universalRow,
           llmBuckets.universal as Record<string, unknown>,
@@ -1040,13 +1058,15 @@ export async function processIntakeDocument(
           llmOverride,
         );
       }
-    } catch {
+    } catch (entityLlmErr) {
+      const detail =
+        entityLlmErr instanceof Error ? entityLlmErr.message : "unknown_error";
       await db.from("audit_logs").insert({
         entity_type: "document",
         entity_id: documentId,
         action: "ENTITY_LLM_EXTRACTION_FAILED",
         actor: "AIMA",
-        metadata: { step: "entity_extraction_llm" },
+        metadata: { step: "entity_extraction_llm", detail },
       });
     }
 
@@ -1131,6 +1151,7 @@ export async function processIntakeDocument(
           legalPresent: extracted.legalPresent,
           entityLlmApplied,
           entityLlmFieldsFilled,
+          entityLlmUsableKeysBeforeMerge,
         },
       });
     }

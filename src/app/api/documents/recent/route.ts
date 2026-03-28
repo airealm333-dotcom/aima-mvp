@@ -48,7 +48,7 @@ export async function GET() {
       supabase.client
         .from("universal_info")
         .select(
-          "document_id, sender_name, recipient_name, reference_number, document_date, document_type, deadline_date",
+          "document_id, sender_name, recipient_name, organization_name, contact_person_name, reference_number, document_date, document_type, deadline_date",
         )
         .in("document_id", documentIds),
       supabase.client
@@ -101,6 +101,10 @@ export async function GET() {
         entity_sender: u?.sender_name != null ? s(u.sender_name) : null,
         entity_addressee:
           u?.recipient_name != null ? s(u.recipient_name) : null,
+        entity_organization_name:
+          u?.organization_name != null ? s(u.organization_name) : null,
+        entity_contact_person_name:
+          u?.contact_person_name != null ? s(u.contact_person_name) : null,
         entity_reference_number:
           u?.reference_number != null ? s(u.reference_number) : null,
         entity_document_date:

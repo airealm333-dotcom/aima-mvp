@@ -41,7 +41,7 @@ This repo includes an MVP intake flow through OCR and **D2 document classificati
 
 - **Primary (SOP):** Gmail messages in an **Unprocessed** label are polled on a schedule. First PDF/image attachment is stored in Supabase, OCR runs, `documents.gmail_message_id` is set, then the message is moved to **Processed**.
 - **Automation:** (1) Optional in-process poll while the server runs: set `GMAIL_AUTOPOLL_INTERVAL_MS` (e.g. `300000` for 5 minutes) — see `src/instrumentation.ts`. (2) On Vercel: `vercel.json` runs `/api/cron/intake-email` every 5 minutes; set `CRON_SECRET` in the project so Vercel sends `Authorization: Bearer …`. (3) Manual or OS cron: `POST`/`GET` `/api/cron/intake-email` with `CRON_SECRET`.
-- **Optional testing:** Manual upload form at `src/app/page.tsx` (disable in production with `NEXT_PUBLIC_MANUAL_INTAKE_ENABLED=false`).
+- **Optional testing:** Manual upload form at `src/app/page.tsx` (disable in production with `NEXT_PUBLIC_MANUAL_INTAKE_ENABLED=false`). **PDFs** use the same **logical split** pipeline as Gmail (`splitPdfIntoLogicalSections`); multiple segments return a `split: true` JSON payload with a `documents` array and show multiple **Results** cards. Set `MANUAL_UPLOAD_PDF_SPLIT=false` to ingest each uploaded PDF as a single document.
 - API: `src/app/api/intake/route.ts` (multipart), `src/app/api/cron/intake-email/route.ts` (email poll).
 - OCR via Google Vision API (with `pdf-parse` PDF fallback).
 - Supabase storage + table writes + audit log.
@@ -62,7 +62,7 @@ This repo includes an MVP intake flow through OCR and **D2 document classificati
 8. Configure Gmail intake (see `.env.example`): `CRON_SECRET` (required for the HTTP cron route and for Vercel Cron) plus either OAuth client + refresh token **or** Workspace service account + delegated user. Create Gmail labels matching `GMAIL_INTAKE_LABEL_UNPROCESSED` / `GMAIL_INTAKE_LABEL_PROCESSED` (or let the first poll create them).
 9. Optional Anthropic LLMs (same `ANTHROPIC_API_KEY`):
    - **Classification (D2):** `CLASSIFICATION_USE_LLM=true`, optionally `CLASSIFICATION_LLM_THRESHOLD` (default `90` — rules confidence must be below this to call the model).
-   - **Entity extraction (D2.5):** `ENTITY_EXTRACTION_USE_LLM=true` to merge structured fields into `universal_info` / `legal_entities` / `invoice_entities` after rule extraction; optionally `ANTHROPIC_ENTITY_MODEL`, `ENTITY_EXTRACTION_OCR_MAX_CHARS`, `ENTITY_EXTRACTION_LLM_OVERRIDE`. See `.env.example`.
+   - **Entity extraction (D2.5):** `ENTITY_EXTRACTION_USE_LLM=true` to merge structured fields into `universal_info` / `legal_entities` / `invoice_entities` after rule extraction. Set **`ANTHROPIC_ENTITY_MODEL`** to the same model ID as classification if you rely on Sonnet 4.x (entity extraction uses a separate env var from `ANTHROPIC_CLASSIFICATION_MODEL`). Optional: `ENTITY_EXTRACTION_OCR_MAX_CHARS`, `ENTITY_EXTRACTION_LLM_OVERRIDE`. See `.env.example`. Audit actions `ENTITY_LLM_NO_EXTRACTABLE_FIELDS` / `ENTITY_LLM_EXTRACTION_FAILED` help debug empty or invalid JSON responses.
 10. Optional: set `GMAIL_AUTOPOLL_INTERVAL_MS=300000` in `.env.local` to poll Gmail every 5 minutes automatically while `npm run dev` or `npm run start` is running (do not rely on this on Vercel; use the included `vercel.json` cron instead).
 11. Run `npm run dev`.
 
@@ -91,14 +91,18 @@ The app stores extracted fields in **three typed tables** keyed to `documents(id
 **New projects (no legacy `document_entities`):**
 
 1. Apply [`sql/create_universal_legal_invoice_tables.sql`](sql/create_universal_legal_invoice_tables.sql) once.
-2. Optional reporting view (one row per document): [`sql/document_entities_reporting_view.sql`](sql/document_entities_reporting_view.sql)
+2. **Existing DBs** created before party columns: apply [`sql/universal_info_party_columns.sql`](sql/universal_info_party_columns.sql) once (adds `organization_name`, `contact_person_name`). New installs from step 1 already include these columns.
+3. Optional reporting view (one row per document): [`sql/document_entities_reporting_view.sql`](sql/document_entities_reporting_view.sql) (re-run after party columns if you use the merged view).
+
+**Party fields:** `recipient_name` / `sender_name` are **directional** (to/from on the piece). `organization_name` and `contact_person_name` are **semantic** (client company and named individual when extractable).
 
 **Existing databases that still have `public.document_entities`:**
 
 1. Apply [`sql/create_universal_legal_invoice_tables.sql`](sql/create_universal_legal_invoice_tables.sql).
-2. Deploy this version of the app (it reads/writes the new tables only).
-3. Optionally backfill historical rows from `document_entities` manually or re-ingest.
-4. Apply [`sql/drop_document_entities_legacy.sql`](sql/drop_document_entities_legacy.sql) to drop the old table and recreate the merged view (re-run step 2’s view script after drop if needed).
+2. Apply [`sql/universal_info_party_columns.sql`](sql/universal_info_party_columns.sql) if your `universal_info` predates those columns.
+3. Deploy this version of the app (it reads/writes the new tables only).
+4. Optionally backfill historical rows from `document_entities` manually or re-ingest.
+5. Apply [`sql/drop_document_entities_legacy.sql`](sql/drop_document_entities_legacy.sql) to drop the old table and recreate the merged view (re-run the reporting view script after drop if needed).
 
 **Legacy scripts (obsolete after cutover):** `documents_entity_extraction.sql`, `documents_entity_physical_columns.sql`, `documents_entity_claimant_respondent.sql`, `documents_entity_ect_extended.sql` — do **not** apply on new installs; keep only for reference or old DB migration.
 

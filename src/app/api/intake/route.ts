@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { processIntakeDocument } from "@/lib/intake-process";
+import { runManualIntakeWithOptionalPdfSplit } from "@/lib/manual-pdf-split-intake";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 
 export const runtime = "nodejs";
@@ -55,13 +55,11 @@ export async function POST(request: Request) {
     const bytes = await file.arrayBuffer();
     const buffer = Buffer.from(bytes);
 
-    const result = await processIntakeDocument({
+    const outcome = await runManualIntakeWithOptionalPdfSplit({
       supabase,
       buffer,
       contentType: file.type,
       fileName: file.name,
-      source: "manual_upload",
-      gmailMessageId: null,
       sender,
       addressee,
       mieName,
@@ -70,7 +68,23 @@ export async function POST(request: Request) {
       requestedDocSequence: parsePositiveInt(formData.get("docSequence"), 0),
     });
 
-    return NextResponse.json(result.body, { status: result.ok ? 200 : result.status });
+    if (!outcome.ok) {
+      return NextResponse.json(outcome.body, { status: outcome.status });
+    }
+
+    if (outcome.response.split) {
+      return NextResponse.json(
+        {
+          split: true,
+          sourceFileName: outcome.response.sourceFileName,
+          documents: outcome.response.documents,
+          errors: outcome.response.errors,
+        },
+        { status: 200 },
+      );
+    }
+
+    return NextResponse.json(outcome.response.body, { status: 200 });
   } catch (error) {
     const detail =
       error instanceof Error ? error.message : "Unexpected server error.";

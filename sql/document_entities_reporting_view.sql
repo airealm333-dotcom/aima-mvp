@@ -7,6 +7,8 @@ select
   d.id as document_id,
   u.sender_name,
   u.recipient_name,
+  u.organization_name,
+  u.contact_person_name,
   u.reference_number,
   u.document_date,
   u.document_type,
