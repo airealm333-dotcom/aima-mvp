@@ -68,6 +68,77 @@ function normalizeLines(input: string) {
     .filter((l) => l.length > 0);
 }
 
+/** Strip noise from regex captures (e.g. TO:: EMPLOYER → EMPLOYER). */
+function normalizeCapturedFieldValue(raw: string): string {
+  return raw
+    .replace(/^[:;,.、，\-–—\s]+/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * True when a line (or label before ":") looks like an ECT/employment form row header, not a person/company name.
+ */
+function isLikelyFormFieldLabelLine(s: string): boolean {
+  const t = s.trim();
+  if (t.length === 0) return true;
+  const head = (t.split(/[:：]/)[0] ?? t).trim();
+  const headNorm = head.replace(/\s+/g, " ").toUpperCase();
+  const fullNorm = t.replace(/\s+/g, " ").toUpperCase();
+
+  const exactTokens = new Set([
+    "NATIONALITY",
+    "NRIC",
+    "FIN",
+    "PASSPORT",
+    "ADDRESS",
+    "EMAIL",
+    "MOBILE",
+    "PHONE",
+    "GENDER",
+    "AGE",
+    "OCCUPATION",
+    "DESIGNATION",
+    "CITIZENSHIP",
+    "EMPLOYEE",
+    "EMPLOYER",
+    "NAME",
+    "SURNAME",
+    "GIVEN NAME",
+    "FIRST NAME",
+    "LAST NAME",
+    "D.O.B",
+    "DOB",
+    "DATE OF BIRTH",
+  ]);
+  if (exactTokens.has(fullNorm) || exactTokens.has(headNorm)) return true;
+
+  return /^(?:NATIONALITY|NRIC|FIN|PASSPORT|PASSPORT\s+NO\.?|ADDRESS|EMAIL|MOBILE|PHONE|CONTACT(?:\s+NO\.?)?|OCCUPATION|DESIGNATION|DATE\s+OF\s+BIRTH|D\.?O\.?B\.?|GENDER|AGE|RELATIONSHIP|CITIZENSHIP|WORK\s+PERMIT)\b/i.test(
+    head,
+  );
+}
+
+/**
+ * Drop OCR/LLM garbage for claimant_name / respondent_name; shared with entity-extraction-llm.
+ */
+export function sanitizeLegalPartyNameValue(raw: string): string | null {
+  let t = normalizeCapturedFieldValue(raw);
+  if (t.length < 2) return null;
+
+  const colonIdx = t.search(/[:：]/);
+  if (colonIdx >= 0) {
+    const left = t.slice(0, colonIdx).trim();
+    const right = t.slice(colonIdx + 1).trim();
+    if (isLikelyFormFieldLabelLine(left) && right.length >= 2) {
+      t = normalizeCapturedFieldValue(right);
+    }
+  }
+
+  if (isLikelyFormFieldLabelLine(t)) return null;
+  if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/i.test(t)) return null;
+  return t.length >= 2 ? t : null;
+}
+
 function parseToIsoDate(raw: string): string | null {
   // Supported:
   // - dd/mm/yyyy
@@ -132,7 +203,7 @@ function pickFirstLineValue(
     for (const re of labels) {
       const m = line.match(re);
       if (!m) continue;
-      const value = (m[1] ?? "").trim();
+      const value = normalizeCapturedFieldValue(m[1] ?? "");
       if (!value) continue;
       return { value, confidence };
     }
@@ -318,11 +389,14 @@ function extractVendorBuyer(text: string, lines: string[]) {
   // Sometimes the labels are within one line without a dedicated token.
   if (!sender && text) {
     const m = text.match(/\b(?:FROM)\b\s*[:-]\s*([A-Z0-9 ,.&'\\/-]{4,})/i);
-    if (m?.[1])
-      return {
-        sender: { value: m[1].trim(), confidence: 60 },
-        buyer: addressee,
-      };
+    if (m?.[1]) {
+      const v = normalizeCapturedFieldValue(m[1]);
+      if (v.length >= 4)
+        return {
+          sender: { value: v, confidence: 60 },
+          buyer: addressee,
+        };
+    }
   }
 
   return { sender, buyer: addressee };
@@ -413,21 +487,29 @@ function extractClaimantRespondentNames(
         /\bNAME\b(?:\s*\([^)]+\))?\s*[:-]?\s*(.+)$/i,
       );
       if (m?.[1]) {
-        const v = m[1].trim();
-        if (v.length >= 2) return { value: v, confidence: 90 };
+        const cleaned = sanitizeLegalPartyNameValue(m[1]);
+        if (cleaned) return { value: cleaned, confidence: 90 };
       }
 
       if (/\bNAME\b(?:\s*\([^)]+\))?\s*[:-]?\s*$/i.test(rawLine)) {
-        const next = (rawLines[i + 1] ?? "").trim();
-        if (next.length >= 2) return { value: next, confidence: 85 };
+        const scanEnd = Math.min(i + 6, windowEnd);
+        for (let j = i + 1; j < scanEnd; j += 1) {
+          const nextRaw = rawLines[j] ?? "";
+          if (nextRaw.trim().length < 2) continue;
+          if (isLikelyFormFieldLabelLine(nextRaw)) continue;
+          const cleaned = sanitizeLegalPartyNameValue(nextRaw);
+          if (cleaned) return { value: cleaned, confidence: 85 };
+        }
       }
 
       // Upper-only line match when raw regex missed noisy OCR
       const um = upperLine.match(/\bNAME\b(?:\s*\([^)]+\))?\s*[:-]?\s*(.+)$/);
       if (um?.[1]) {
         const v = um[1].trim();
-        if (v.length >= 2 && !/^EMAIL\b/i.test(v))
-          return { value: v, confidence: 82 };
+        if (!/^EMAIL\b/i.test(v)) {
+          const cleaned = sanitizeLegalPartyNameValue(v);
+          if (cleaned) return { value: cleaned, confidence: 82 };
+        }
       }
     }
 
@@ -606,16 +688,6 @@ export function extractDocumentEntitiesFromOcrText(
   );
   universal.document_date = documentDate ?? findFirstDate(normalizedText);
 
-  const universalConfidence = averageConfidence([
-    universal.sender,
-    universal.addressee,
-    universal.organization_name,
-    universal.contact_person_name,
-    universal.reference_number,
-    universal.document_date,
-    universal.document_type,
-  ]);
-
   const invoiceNumber = extractInvoiceNumber(normalizedText, lines);
   const invoiceDate = extractInvoiceDate(normalizedText);
   const dueDate = extractDueDate(normalizedText);
@@ -733,6 +805,31 @@ export function extractDocumentEntitiesFromOcrText(
   if (employmentStatus) legalEntities.employment_status = employmentStatus;
   if (occupation) legalEntities.occupation = occupation;
   if (basicSalary) legalEntities.basic_salary_monthly = basicSalary;
+
+  const orgSuffixPattern =
+    /\b(PTE\.?\s*LTD|PTE\s+LTD|LTD\.?|LIMITED|LLP|LLC|INC\.?|CORP\.?|SDN\.?\s*BHD|BERHAD|CO\.\s*,\s*REG)\b/i;
+  if (
+    classificationLabel === "LEGAL" &&
+    !universal.organization_name &&
+    legalEntities.respondent_name?.value &&
+    orgSuffixPattern.test(legalEntities.respondent_name.value) &&
+    legalEntities.respondent_name.value.length >= 8
+  ) {
+    universal.organization_name = {
+      value: legalEntities.respondent_name.value,
+      confidence: 60,
+    };
+  }
+
+  const universalConfidence = averageConfidence([
+    universal.sender,
+    universal.addressee,
+    universal.organization_name,
+    universal.contact_person_name,
+    universal.reference_number,
+    universal.document_date,
+    universal.document_type,
+  ]);
 
   const legalPresent = Boolean(
     legalEntities.case_number ||

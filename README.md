@@ -102,7 +102,9 @@ The app stores extracted fields in **three typed tables** keyed to `documents(id
 2. Apply [`sql/universal_info_party_columns.sql`](sql/universal_info_party_columns.sql) if your `universal_info` predates those columns.
 3. Deploy this version of the app (it reads/writes the new tables only).
 4. Optionally backfill historical rows from `document_entities` manually or re-ingest.
-5. Apply [`sql/drop_document_entities_legacy.sql`](sql/drop_document_entities_legacy.sql) to drop the old table and recreate the merged view (re-run the reporting view script after drop if needed).
+5. **Stop stray inserts:** the app does not write `document_entities`; empty rows are usually from a DB trigger on `documents`. Optional audit: [`sql/document_entities_legacy_audit.sql`](sql/document_entities_legacy_audit.sql). Then run [`sql/drop_document_entities_triggers_on_documents.sql`](sql/drop_document_entities_triggers_on_documents.sql).
+6. Apply [`sql/drop_document_entities_legacy.sql`](sql/drop_document_entities_legacy.sql) to drop the old table (and the old merged view it depends on).
+7. Re-apply [`sql/document_entities_reporting_view.sql`](sql/document_entities_reporting_view.sql) so `document_entities_merged` exists again (built from `universal_info` + `legal_entities` + `invoice_entities`).
 
 **Legacy scripts (obsolete after cutover):** `documents_entity_extraction.sql`, `documents_entity_physical_columns.sql`, `documents_entity_claimant_respondent.sql`, `documents_entity_ect_extended.sql` — do **not** apply on new installs; keep only for reference or old DB migration.
 

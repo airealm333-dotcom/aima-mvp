@@ -1,5 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { ClassificationLabel } from "@/lib/document-classify";
+import { sanitizeLegalPartyNameValue } from "@/lib/document-entities";
 
 /** Keys the LLM may return for universal_info (pipeline-owned keys are never applied from LLM). */
 export const UNIVERSAL_LLM_KEYS = [
@@ -256,7 +257,13 @@ function normalizeLegalBucket(
       continue;
     }
     const s = coerceString(v);
-    if (s) out[key] = s;
+    if (!s) continue;
+    if (key === "claimant_name" || key === "respondent_name") {
+      const cleaned = sanitizeLegalPartyNameValue(s);
+      if (cleaned) out[key] = cleaned;
+      continue;
+    }
+    out[key] = s;
   }
   return out;
 }
@@ -393,13 +400,20 @@ export async function extractEntitiesWithLlm(
     invoice: INVOICE_LLM_KEYS.join(", "),
   };
 
+  const legalPartyHint =
+    classificationLabel === "LEGAL"
+      ? `
+Legal / tribunal (e.g. ECT): claimant_name and respondent_name must be the actual PERSON or COMPANY named in the "Particulars of Claimant" / "Particulars of Respondent" sections (the value next to Name or the block heading). Never use row labels or field names as the name — e.g. do not output Nationality, NRIC, Occupation, Address, Email, Employer, Employee, or section titles as claimant_name or respondent_name. If the true name is not clearly in the OCR, use null.
+`
+      : "";
+
   const userMsg = `You extract structured data from registered-office mail OCR. The document was classified as: ${classificationLabel}.
 
 Semantic field meanings (universal):
 - recipient_name / sender_name: directional — who the mail is addressed TO on the envelope or "TO:" block vs who ISSUED it (letterhead / "FROM:" / government agency).
 - organization_name: the client COMPANY or legal entity the matter concerns (often the addressee company or name after "Re:", UEN block, or registered-office client). Use null if only a person is named with no clear entity.
 - contact_person_name: a natural PERSON only when explicitly labeled (e.g. Attn:, Attention:, Dear Mr/Ms, signatory line). Use null if unclear or not present.
-
+${legalPartyHint}
 Rules:
 - Use ONLY information clearly present in the OCR. If a field is not in the text, use null.
 - Do not invent UENs, amounts, dates, or names.
