@@ -82,30 +82,23 @@ comment on column public.documents.classification_method is 'rules | llm | rules
 
 Intake sets `documents.status` to **`D2_CLASSIFIED`** after a successful classification write. Allowed label values are enforced in application code (`src/lib/document-classify.ts`).
 
-### Supabase: document_entities (D2.5 Entity Extraction)
+### Supabase: D2.5 entity tables (`universal_info`, `legal_entities`, `invoice_entities`)
 
-Apply once (adjust schema name if not `public`):
+The app stores extracted fields in **three typed tables** keyed to `documents(id)` (replacing the legacy `document_entities` model).
 
-```sql
--- D2.5 extracted entities
--- Stored per document and per entity_type (universal_minimal, invoice_core)
--- See: sql/documents_entity_extraction.sql
-```
+**New projects (no legacy `document_entities`):**
 
-In Supabase SQL editor, apply:
-[`sql/documents_entity_extraction.sql`](sql/documents_entity_extraction.sql)
+1. Apply [`sql/create_universal_legal_invoice_tables.sql`](sql/create_universal_legal_invoice_tables.sql) once.
+2. Optional reporting view (one row per document): [`sql/document_entities_reporting_view.sql`](sql/document_entities_reporting_view.sql)
 
-Then apply the physical-column expansion:
-[`sql/documents_entity_physical_columns.sql`](sql/documents_entity_physical_columns.sql)
+**Existing databases that still have `public.document_entities`:**
 
-Then apply claimant/respondent columns (ECT-style claim forms):
-[`sql/documents_entity_claimant_respondent.sql`](sql/documents_entity_claimant_respondent.sql)
+1. Apply [`sql/create_universal_legal_invoice_tables.sql`](sql/create_universal_legal_invoice_tables.sql).
+2. Deploy this version of the app (it reads/writes the new tables only).
+3. Optionally backfill historical rows from `document_entities` manually or re-ingest.
+4. Apply [`sql/drop_document_entities_legacy.sql`](sql/drop_document_entities_legacy.sql) to drop the old table and recreate the merged view (re-run step 2’s view script after drop if needed).
 
-Then apply ECT extended fields (emails, employment Section C, respondent contact):
-[`sql/documents_entity_ect_extended.sql`](sql/documents_entity_ect_extended.sql)
-
-Optional — merged reporting view (one row per document):
-[`sql/document_entities_reporting_view.sql`](sql/document_entities_reporting_view.sql)
+**Legacy scripts (obsolete after cutover):** `documents_entity_extraction.sql`, `documents_entity_physical_columns.sql`, `documents_entity_claimant_respondent.sql`, `documents_entity_ect_extended.sql` — do **not** apply on new installs; keep only for reference or old DB migration.
 
 ### Email subject format (optional)
 
@@ -148,8 +141,9 @@ The API currently inserts these fields:
 
 - `mail_items`: `id`, `mrid`, `received_at`, `sender`, `addressee`, `envelope_condition`, `mie_name`, `status`
 - `documents`: `id`, `drid`, `mail_item_id`, `gmail_message_id`, `file_path`, `sha256_hash`, `ocr_text`, `status`, `classification_label`, `classification_confidence`, `classification_method`, `classification_rationale`
-- `document_entities`: `id`, `document_id`, `entity_type`, `entities_json`, `confidence`, `method`, `created_at`
-- `document_entities` (expanded): plus physical fields for universal/invoice/legal entities (`sender`, `reference_number`, `invoice_number`, `case_number`, etc.)
+- `universal_info`: one row per document (`document_id`, `drid`, `mrid`, `full_text`, envelope fields, `document_type`, paths, page counts, etc.)
+- `legal_entities`: optional row per document (ECT / legal / tax-style columns)
+- `invoice_entities`: optional row per document (invoice / bill-style columns)
 - `audit_logs`: `entity_type`, `entity_id`, `action`, `actor`, `metadata` (includes `OCR_COMPLETED`, `OCR_COMPLETED_LOW_COVERAGE`, `CLASSIFICATION_COMPLETED`, etc.)
 
 Current scope includes intake, OCR, and **D2 classification** on `documents` (`D2_CLASSIFIED`). Client matching, consolidation, outbound email, and Odoo are not yet implemented.
@@ -181,32 +175,26 @@ After ingesting a multi-page PDF:
 
 After ingesting a document:
 
-1. Ensure `/api/documents/recent` returns the new entity fields on recent documents (best-effort).
-2. In Supabase, check that `document_entities` has rows for the inserted documents:
+1. Ensure `/api/documents/recent` returns the flattened `entity_*` fields (best-effort).
+2. In Supabase, confirm rows exist:
 
 ```sql
-select document_id, entity_type, confidence, method, entities_json
-from public.document_entities
+select document_id, drid, document_type, sender_name, recipient_name
+from public.universal_info
 order by created_at desc
 limit 20;
 ```
 
-Check new physical columns are populated:
+```sql
+select document_id, case_number, claimant_name, respondent_name
+from public.legal_entities
+order by created_at desc
+limit 20;
+```
 
 ```sql
-select
-  document_id,
-  entity_type,
-  sender,
-  addressee,
-  reference_number,
-  invoice_number,
-  total_amount,
-  case_number,
-  authority,
-  deadline,
-  confidence
-from public.document_entities
+select document_id, bill_number, total_amount_due, currency
+from public.invoice_entities
 order by created_at desc
 limit 20;
 ```

@@ -1,9 +1,4 @@
 import { NextResponse } from "next/server";
-import type {
-  InvoiceCoreEntities,
-  LegalCoreEntities,
-  UniversalMinimalEntities,
-} from "@/lib/document-entities";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 
 export const runtime = "nodejs";
@@ -40,8 +35,6 @@ export async function GET() {
       );
     }
 
-    // Supabase client in this repo is loosely typed, which can lead to `never[]` inference.
-    // We only rely on `id` to fetch entity rows.
     const documents = (data ?? []) as Array<
       { id: string } & Record<string, unknown>
     >;
@@ -51,194 +44,115 @@ export async function GET() {
       return NextResponse.json({ items: [] });
     }
 
-    // Fetch latest extracted entities for these documents.
-    const { data: entityRows, error: entitiesError } = await supabase.client
-      .from("document_entities")
-      .select(
-        "document_id, entity_type, entities_json, confidence, method, created_at, sender, addressee, reference_number, document_date, document_type, invoice_number, invoice_date, due_date, currency, total_amount, tax_amount, vendor_name, buyer_name, case_number, notice_date, authority, deadline, reference_legal, claimant_name, respondent_name, claimant_email, respondent_email, respondent_contact_name, employment_start_date, employment_end_date, employment_status, occupation, basic_salary_monthly",
-      )
-      .in("document_id", documentIds)
-      .order("created_at", { ascending: false })
-      .limit(50);
+    const [uniRes, legRes, invRes] = await Promise.all([
+      supabase.client
+        .from("universal_info")
+        .select(
+          "document_id, sender_name, recipient_name, reference_number, document_date, document_type, deadline_date",
+        )
+        .in("document_id", documentIds),
+      supabase.client
+        .from("legal_entities")
+        .select(
+          "document_id, case_number, court_name, claimant_name, claimant_email, respondent_name, respondent_email, respondent_contact, employment_start_date, employment_end_date, occupation, basic_salary",
+        )
+        .in("document_id", documentIds),
+      supabase.client
+        .from("invoice_entities")
+        .select(
+          "document_id, bill_number, bill_date, due_date, currency, gst_amount, total_amount_due, account_name, service_type",
+        )
+        .in("document_id", documentIds),
+    ]);
 
-    if (entitiesError) {
-      // Non-fatal: return documents without entity enrichment.
+    if (uniRes.error || legRes.error || invRes.error) {
       return NextResponse.json({ items: documents });
     }
 
-    const typedRows = (entityRows ?? []) as Array<{
-      document_id: string;
-      entity_type: "universal_minimal" | "invoice_core" | "legal_core";
-      entities_json:
-        | UniversalMinimalEntities
-        | InvoiceCoreEntities
-        | LegalCoreEntities;
-      confidence?: number | null;
-      method?: string | null;
-      created_at?: string | null;
-      sender?: string | null;
-      addressee?: string | null;
-      reference_number?: string | null;
-      document_date?: string | null;
-      document_type?: string | null;
-      invoice_number?: string | null;
-      invoice_date?: string | null;
-      due_date?: string | null;
-      currency?: string | null;
-      total_amount?: string | number | null;
-      tax_amount?: string | number | null;
-      vendor_name?: string | null;
-      buyer_name?: string | null;
-      case_number?: string | null;
-      notice_date?: string | null;
-      authority?: string | null;
-      deadline?: string | null;
-      reference_legal?: string | null;
-      claimant_name?: string | null;
-      respondent_name?: string | null;
-      claimant_email?: string | null;
-      respondent_email?: string | null;
-      respondent_contact_name?: string | null;
-      employment_start_date?: string | null;
-      employment_end_date?: string | null;
-      employment_status?: string | null;
-      occupation?: string | null;
-      basic_salary_monthly?: string | number | null;
-    }>;
+    const s = (v: unknown) =>
+      v != null && v !== "" ? String(v) : null;
 
-    type EntityRow = (typeof typedRows)[number];
-
-    const byDoc: Record<
-      string,
-      {
-        universal?: EntityRow & { entities_json: UniversalMinimalEntities };
-        invoice?: EntityRow & { entities_json: InvoiceCoreEntities };
-        legal?: EntityRow & { entities_json: LegalCoreEntities };
-      }
-    > = {};
-
-    for (const row of typedRows) {
-      const docId = row.document_id;
-      byDoc[docId] ??= {};
-      if (row.entity_type === "universal_minimal") {
-        byDoc[docId].universal = {
-          ...row,
-          entities_json: row.entities_json as UniversalMinimalEntities,
-        };
-      }
-      if (row.entity_type === "invoice_core") {
-        byDoc[docId].invoice = {
-          ...row,
-          entities_json: row.entities_json as InvoiceCoreEntities,
-        };
-      }
-      if (row.entity_type === "legal_core") {
-        byDoc[docId].legal = {
-          ...row,
-          entities_json: row.entities_json as LegalCoreEntities,
-        };
-      }
-    }
-
-    const flattenEntityValue = (maybeEntityField: unknown): string | null => {
-      if (!maybeEntityField) return null;
-      if (typeof maybeEntityField === "string") return maybeEntityField;
-
-      if (typeof maybeEntityField !== "object") return null;
-      const maybeObj = maybeEntityField as { value?: unknown };
-      const v = maybeObj.value;
-      if (typeof v === "string") return v;
-      return null;
-    };
+    const uniByDoc = Object.fromEntries(
+      (uniRes.data ?? []).map((r: Record<string, unknown>) => [
+        r.document_id as string,
+        r,
+      ]),
+    );
+    const legByDoc = Object.fromEntries(
+      (legRes.data ?? []).map((r: Record<string, unknown>) => [
+        r.document_id as string,
+        r,
+      ]),
+    );
+    const invByDoc = Object.fromEntries(
+      (invRes.data ?? []).map((r: Record<string, unknown>) => [
+        r.document_id as string,
+        r,
+      ]),
+    );
 
     const items = documents.map((doc) => {
-      const enriched = byDoc[doc.id] ?? {};
-      const u =
-        enriched.universal?.entities_json ?? ({} as UniversalMinimalEntities);
-      const inv =
-        enriched.invoice?.entities_json ?? ({} as InvoiceCoreEntities);
-      const legal = enriched.legal?.entities_json ?? ({} as LegalCoreEntities);
+      const u = uniByDoc[doc.id] as Record<string, unknown> | undefined;
+      const leg = legByDoc[doc.id] as Record<string, unknown> | undefined;
+      const inv = invByDoc[doc.id] as Record<string, unknown> | undefined;
 
       return {
         ...doc,
-        entity_sender:
-          enriched.universal?.sender ?? flattenEntityValue(u.sender),
+        entity_sender: u?.sender_name != null ? s(u.sender_name) : null,
         entity_addressee:
-          enriched.universal?.addressee ?? flattenEntityValue(u.addressee),
+          u?.recipient_name != null ? s(u.recipient_name) : null,
         entity_reference_number:
-          enriched.universal?.reference_number ??
-          flattenEntityValue(u.reference_number),
+          u?.reference_number != null ? s(u.reference_number) : null,
         entity_document_date:
-          enriched.universal?.document_date ??
-          flattenEntityValue(u.document_date),
+          u?.document_date != null ? s(u.document_date) : null,
         entity_document_type:
-          enriched.universal?.document_type ??
-          flattenEntityValue(u.document_type),
+          u?.document_type != null ? s(u.document_type) : null,
 
         entity_invoice_number:
-          enriched.invoice?.invoice_number ??
-          flattenEntityValue(inv.invoice_number),
+          inv?.bill_number != null ? s(inv.bill_number) : null,
         entity_invoice_date:
-          enriched.invoice?.invoice_date ??
-          flattenEntityValue(inv.invoice_date),
-        entity_due_date:
-          enriched.invoice?.due_date ?? flattenEntityValue(inv.due_date),
-        entity_currency:
-          enriched.invoice?.currency ?? flattenEntityValue(inv.currency),
+          inv?.bill_date != null ? s(inv.bill_date) : null,
+        entity_due_date: inv?.due_date != null ? s(inv.due_date) : null,
+        entity_currency: inv?.currency != null ? s(inv.currency) : null,
         entity_total_amount:
-          enriched.invoice?.total_amount != null
-            ? String(enriched.invoice.total_amount)
-            : flattenEntityValue(inv.total_amount),
+          inv?.total_amount_due != null ? s(inv.total_amount_due) : null,
         entity_tax_amount:
-          enriched.invoice?.tax_amount != null
-            ? String(enriched.invoice.tax_amount)
-            : flattenEntityValue(inv.tax_amount),
+          inv?.gst_amount != null ? s(inv.gst_amount) : null,
         entity_vendor_name:
-          enriched.invoice?.vendor_name ?? flattenEntityValue(inv.vendor_name),
+          inv?.account_name != null ? s(inv.account_name) : null,
         entity_buyer_name:
-          enriched.invoice?.buyer_name ?? flattenEntityValue(inv.buyer_name),
+          inv?.service_type != null ? s(inv.service_type) : null,
 
         entity_case_number:
-          enriched.legal?.case_number ?? flattenEntityValue(legal.case_number),
-        entity_notice_date:
-          enriched.legal?.notice_date ?? flattenEntityValue(legal.notice_date),
-        entity_authority:
-          enriched.legal?.authority ?? flattenEntityValue(legal.authority),
+          leg?.case_number != null ? s(leg.case_number) : null,
+        entity_notice_date: null,
+        entity_authority: leg?.court_name != null ? s(leg.court_name) : null,
         entity_deadline:
-          enriched.legal?.deadline ?? flattenEntityValue(legal.deadline),
+          u?.deadline_date != null ? s(u.deadline_date) : null,
         entity_claimant_name:
-          enriched.legal?.claimant_name ??
-          flattenEntityValue(legal.claimant_name),
+          leg?.claimant_name != null ? s(leg.claimant_name) : null,
         entity_respondent_name:
-          enriched.legal?.respondent_name ??
-          flattenEntityValue(legal.respondent_name),
+          leg?.respondent_name != null ? s(leg.respondent_name) : null,
         entity_claimant_email:
-          enriched.legal?.claimant_email ??
-          flattenEntityValue(legal.claimant_email),
+          leg?.claimant_email != null ? s(leg.claimant_email) : null,
         entity_respondent_email:
-          enriched.legal?.respondent_email ??
-          flattenEntityValue(legal.respondent_email),
+          leg?.respondent_email != null ? s(leg.respondent_email) : null,
         entity_respondent_contact_name:
-          enriched.legal?.respondent_contact_name ??
-          flattenEntityValue(legal.respondent_contact_name),
+          leg?.respondent_contact != null ? s(leg.respondent_contact) : null,
         entity_employment_start_date:
-          enriched.legal?.employment_start_date ??
-          flattenEntityValue(legal.employment_start_date),
+          leg?.employment_start_date != null
+            ? s(leg.employment_start_date)
+            : null,
         entity_employment_end_date:
-          enriched.legal?.employment_end_date ??
-          flattenEntityValue(legal.employment_end_date),
-        entity_employment_status:
-          enriched.legal?.employment_status ??
-          flattenEntityValue(legal.employment_status),
+          leg?.employment_end_date != null
+            ? s(leg.employment_end_date)
+            : null,
+        entity_employment_status: null,
         entity_occupation:
-          enriched.legal?.occupation ?? flattenEntityValue(legal.occupation),
+          leg?.occupation != null ? s(leg.occupation) : null,
         entity_basic_salary_monthly:
-          enriched.legal?.basic_salary_monthly != null
-            ? String(enriched.legal.basic_salary_monthly)
-            : flattenEntityValue(legal.basic_salary_monthly),
-        entity_reference_legal:
-          enriched.legal?.reference_legal ??
-          flattenEntityValue(legal.reference_legal),
+          leg?.basic_salary != null ? s(leg.basic_salary) : null,
+        entity_reference_legal: null,
       };
     });
 

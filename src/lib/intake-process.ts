@@ -44,28 +44,6 @@ function buildEntitySummaryFromExtracted(
   };
 }
 
-function buildEntitySummaryFromDbRows(
-  rows: Array<Record<string, unknown>>,
-): IntakeEntitySummary {
-  const legal = rows.find((r) => r.entity_type === "legal_core");
-  const universal = rows.find((r) => r.entity_type === "universal_minimal");
-  const invoice = rows.find((r) => r.entity_type === "invoice_core");
-  const s = (v: unknown) => (typeof v === "string" ? v : null);
-  return {
-    client_name:
-      s(legal?.claimant_name) ??
-      s(universal?.sender) ??
-      s(invoice?.buyer_name) ??
-      null,
-    company_name:
-      s(legal?.respondent_name) ??
-      s(invoice?.vendor_name) ??
-      s(universal?.addressee) ??
-      null,
-    claimant_email: s(legal?.claimant_email),
-    respondent_email: s(legal?.respondent_email),
-  };
-}
 type LooseSupabaseClient = {
   // biome-ignore lint/suspicious/noExplicitAny: Supabase client is untyped; table queries need a loose chain.
   from: (table: string) => any;
@@ -78,6 +56,107 @@ type LooseSupabaseClient = {
     };
   };
 };
+
+function parseNumericForDb(v: string | null | undefined): number | null {
+  if (v == null || v === "") return null;
+  const n = Number(String(v).replace(/,/g, ""));
+  return Number.isFinite(n) ? n : null;
+}
+
+async function fetchEntitySummaryFromTables(
+  db: LooseSupabaseClient,
+  documentId: string,
+): Promise<IntakeEntitySummary | null> {
+  try {
+    const [uRes, lRes, iRes] = await Promise.all([
+      db
+        .from("universal_info")
+        .select("sender_name, recipient_name")
+        .eq("document_id", documentId)
+        .maybeSingle(),
+      db
+        .from("legal_entities")
+        .select("claimant_name, respondent_name, claimant_email, respondent_email")
+        .eq("document_id", documentId)
+        .maybeSingle(),
+      db
+        .from("invoice_entities")
+        .select("account_name")
+        .eq("document_id", documentId)
+        .maybeSingle(),
+    ]);
+    const u = uRes.data as Record<string, unknown> | null;
+    const l = lRes.data as Record<string, unknown> | null;
+    const i = iRes.data as Record<string, unknown> | null;
+    const s = (x: unknown) => (typeof x === "string" ? x : null);
+    const client_name =
+      s(l?.claimant_name) ?? s(u?.sender_name) ?? s(i?.account_name) ?? null;
+    const company_name =
+      s(l?.respondent_name) ?? s(u?.recipient_name) ?? null;
+    const claimant_email = s(l?.claimant_email);
+    const respondent_email = s(l?.respondent_email);
+    if (!client_name && !company_name && !claimant_email && !respondent_email)
+      return null;
+    return {
+      client_name,
+      company_name,
+      claimant_email,
+      respondent_email,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function copyTypedEntityTablesFromCanonical(
+  db: LooseSupabaseClient,
+  canonicalDocumentId: string,
+  newDocumentId: string,
+  newDrid: string,
+  newMrid: string,
+): Promise<void> {
+  const u = await db
+    .from("universal_info")
+    .select("*")
+    .eq("document_id", canonicalDocumentId)
+    .maybeSingle();
+  if (u.data && !u.error) {
+    const row = { ...(u.data as Record<string, unknown>) };
+    delete row.id;
+    delete row.created_at;
+    delete row.updated_at;
+    row.document_id = newDocumentId;
+    row.drid = newDrid;
+    row.mrid = newMrid;
+    await db.from("universal_info").upsert(row, { onConflict: "document_id" });
+  }
+
+  const l = await db
+    .from("legal_entities")
+    .select("*")
+    .eq("document_id", canonicalDocumentId)
+    .maybeSingle();
+  if (l.data && !l.error) {
+    const row = { ...(l.data as Record<string, unknown>) };
+    delete row.id;
+    delete row.created_at;
+    row.document_id = newDocumentId;
+    await db.from("legal_entities").upsert(row, { onConflict: "document_id" });
+  }
+
+  const inv = await db
+    .from("invoice_entities")
+    .select("*")
+    .eq("document_id", canonicalDocumentId)
+    .maybeSingle();
+  if (inv.data && !inv.error) {
+    const row = { ...(inv.data as Record<string, unknown>) };
+    delete row.id;
+    delete row.created_at;
+    row.document_id = newDocumentId;
+    await db.from("invoice_entities").upsert(row, { onConflict: "document_id" });
+  }
+}
 
 function asLooseClient(
   client: SupabaseAdminBundle["client"],
@@ -573,94 +652,34 @@ export async function processIntakeDocument(
       };
     }
 
-    // Best-effort: copy extracted entities from canonical duplicate source.
+    // Best-effort: copy universal_info / legal_entities / invoice_entities from canonical.
     try {
-      const canonicalEntities = await db
-        .from("document_entities")
-        .select(
-          "entity_type, entities_json, confidence, method, sender, addressee, reference_number, document_type, document_date, invoice_number, invoice_date, due_date, currency, total_amount, tax_amount, vendor_name, buyer_name, case_number, notice_date, authority, deadline, reference_legal, claimant_name, respondent_name, claimant_email, respondent_email, respondent_contact_name, employment_start_date, employment_end_date, employment_status, occupation, basic_salary_monthly",
-        )
-        .eq("document_id", canonicalDocument.id);
-
-      if (!canonicalEntities.error && canonicalEntities.data?.length) {
-        const rowsToInsert = canonicalEntities.data.map(
-          (row: Record<string, unknown>) => ({
-            document_id: documentId,
-            entity_type:
-              (row.entity_type as string | null) ?? "universal_minimal",
-            entities_json: row.entities_json ?? {},
-            confidence: (row.confidence as number | null) ?? 0,
-            method: (row.method as string | null) ?? "rules",
-            sender: (row.sender as string | null) ?? null,
-            addressee: (row.addressee as string | null) ?? null,
-            reference_number: (row.reference_number as string | null) ?? null,
-            document_date: (row.document_date as string | null) ?? null,
-            document_type: (row.document_type as string | null) ?? null,
-            invoice_number: (row.invoice_number as string | null) ?? null,
-            invoice_date: (row.invoice_date as string | null) ?? null,
-            due_date: (row.due_date as string | null) ?? null,
-            currency: (row.currency as string | null) ?? null,
-            total_amount: (row.total_amount as string | number | null) ?? null,
-            tax_amount: (row.tax_amount as string | number | null) ?? null,
-            vendor_name: (row.vendor_name as string | null) ?? null,
-            buyer_name: (row.buyer_name as string | null) ?? null,
-            case_number: (row.case_number as string | null) ?? null,
-            notice_date: (row.notice_date as string | null) ?? null,
-            authority: (row.authority as string | null) ?? null,
-            deadline: (row.deadline as string | null) ?? null,
-            reference_legal: (row.reference_legal as string | null) ?? null,
-            claimant_name: (row.claimant_name as string | null) ?? null,
-            respondent_name: (row.respondent_name as string | null) ?? null,
-            claimant_email: (row.claimant_email as string | null) ?? null,
-            respondent_email: (row.respondent_email as string | null) ?? null,
-            respondent_contact_name:
-              (row.respondent_contact_name as string | null) ?? null,
-            employment_start_date:
-              (row.employment_start_date as string | null) ?? null,
-            employment_end_date:
-              (row.employment_end_date as string | null) ?? null,
-            employment_status:
-              (row.employment_status as string | null) ?? null,
-            occupation: (row.occupation as string | null) ?? null,
-            basic_salary_monthly:
-              (row.basic_salary_monthly as string | number | null) ?? null,
-          }),
-        );
-
-        await db
-          .from("document_entities")
-          .upsert(rowsToInsert, { onConflict: "document_id,entity_type" });
-
-        await db.from("audit_logs").insert({
-          entity_type: "document",
-          entity_id: documentId,
-          action: "ENTITY_EXTRACTION_COPIED_FROM_CANONICAL",
-          actor: "AIMA",
-          metadata: {
-            duplicateOfDocumentId: canonicalDocument.id,
-            copiedEntityTypes: rowsToInsert.map(
-              (r: { entity_type: string }) => r.entity_type,
-            ),
-          },
-        });
-      }
+      await copyTypedEntityTablesFromCanonical(
+        db,
+        canonicalDocument.id,
+        documentId,
+        drid,
+        mrid,
+      );
+      await db.from("audit_logs").insert({
+        entity_type: "document",
+        entity_id: documentId,
+        action: "ENTITY_EXTRACTION_COPIED_FROM_CANONICAL",
+        actor: "AIMA",
+        metadata: {
+          duplicateOfDocumentId: canonicalDocument.id,
+        },
+      });
     } catch {
       // Non-fatal: missing table or query errors should not break intake.
     }
 
     let duplicateEntitySummary: IntakeEntitySummary | null = null;
     try {
-      const ent = await db
-        .from("document_entities")
-        .select(
-          "entity_type, claimant_name, respondent_name, claimant_email, respondent_email, sender, vendor_name, buyer_name, addressee",
-        )
-        .eq("document_id", documentId);
-      if (!ent.error && ent.data?.length) {
-        duplicateEntitySummary = buildEntitySummaryFromDbRows(
-          ent.data as Array<Record<string, unknown>>,
-        );
-      }
+      duplicateEntitySummary = await fetchEntitySummaryFromTables(
+        db,
+        documentId,
+      );
     } catch {
       // Non-fatal
     }
@@ -912,58 +931,85 @@ export async function processIntakeDocument(
 
     entitySummary = buildEntitySummaryFromExtracted(extracted);
 
-    const universalHasAnyFields =
-      extracted.universal && Object.keys(extracted.universal).length > 0;
+    const docTypeForRow =
+      extracted.universal.document_type?.value ?? classification.label;
 
-    const rowsToUpsert: Array<{
-      document_id: string;
-      entity_type: "universal_minimal" | "invoice_core" | "legal_core";
-      entities_json: unknown;
-      confidence: number;
-      method: string;
-      sender?: string | null;
-      addressee?: string | null;
-      reference_number?: string | null;
-      document_date?: string | null;
-      document_type?: string | null;
-      invoice_number?: string | null;
-      invoice_date?: string | null;
-      due_date?: string | null;
-      currency?: string | null;
-      total_amount?: string | null;
-      tax_amount?: string | null;
-      vendor_name?: string | null;
-      buyer_name?: string | null;
-      case_number?: string | null;
-      notice_date?: string | null;
-      authority?: string | null;
-      deadline?: string | null;
-      reference_legal?: string | null;
-      claimant_name?: string | null;
-      respondent_name?: string | null;
-      claimant_email?: string | null;
-      respondent_email?: string | null;
-      respondent_contact_name?: string | null;
-      employment_start_date?: string | null;
-      employment_end_date?: string | null;
-      employment_status?: string | null;
-      occupation?: string | null;
-      basic_salary_monthly?: string | null;
-    }> = [];
+    const universalRow = {
+      document_id: documentId,
+      drid,
+      mrid,
+      full_text: ocr.text,
+      recipient_name: extracted.universal.addressee?.value ?? null,
+      sender_name: extracted.universal.sender?.value ?? null,
+      reference_number: extracted.universal.reference_number?.value ?? null,
+      document_date: extracted.universal.document_date?.value ?? null,
+      document_type: docTypeForRow,
+      classification_confidence: Math.round(classification.confidence),
+      deadline_date: extracted.legal?.deadline?.value ?? null,
+      action_required: Boolean(extracted.legal?.deadline?.value),
+      page_count: ocr.pageCount,
+      page_start: ocr.pageCount > 0 ? 1 : null,
+      page_end: ocr.pageCount > 0 ? ocr.pageCount : null,
+      pdf_path: storagePath,
+      original_pdf_path: storagePath,
+    };
 
-    if (universalHasAnyFields && extracted.universalConfidence > 0) {
-      rowsToUpsert.push({
-        document_id: documentId,
-        entity_type: "universal_minimal",
-        entities_json: extracted.universal,
-        confidence: extracted.universalConfidence,
-        method: "rules",
-        sender: extracted.universal.sender?.value ?? null,
-        addressee: extracted.universal.addressee?.value ?? null,
-        reference_number: extracted.universal.reference_number?.value ?? null,
-        document_date: extracted.universal.document_date?.value ?? null,
-        document_type: extracted.universal.document_type?.value ?? null,
+    const universalUpsert = await db
+      .from("universal_info")
+      .upsert(universalRow, { onConflict: "document_id" });
+
+    if (universalUpsert.error) {
+      await db.from("audit_logs").insert({
+        entity_type: "document",
+        entity_id: documentId,
+        action: "ENTITY_EXTRACTION_FAILED",
+        actor: "AIMA",
+        metadata: {
+          detail: universalUpsert.error.message,
+          step: "universal_info",
+        },
       });
+    }
+
+    if (
+      extracted.legal &&
+      extracted.legalPresent &&
+      extracted.legalConfidence > 0
+    ) {
+      const legalRow = {
+        document_id: documentId,
+        case_number: extracted.legal.case_number?.value ?? null,
+        court_name: extracted.legal.authority?.value ?? null,
+        claimant_name: extracted.legal.claimant_name?.value ?? null,
+        claimant_email: extracted.legal.claimant_email?.value ?? null,
+        respondent_name: extracted.legal.respondent_name?.value ?? null,
+        respondent_email: extracted.legal.respondent_email?.value ?? null,
+        respondent_contact:
+          extracted.legal.respondent_contact_name?.value ?? null,
+        employment_start_date:
+          extracted.legal.employment_start_date?.value ?? null,
+        employment_end_date:
+          extracted.legal.employment_end_date?.value ?? null,
+        basic_salary: parseNumericForDb(
+          extracted.legal.basic_salary_monthly?.value,
+        ),
+        occupation: extracted.legal.occupation?.value ?? null,
+      };
+      const legalUpsert = await db
+        .from("legal_entities")
+        .upsert(legalRow, { onConflict: "document_id" });
+      if (legalUpsert.error) {
+        await db.from("audit_logs").insert({
+          entity_type: "document",
+          entity_id: documentId,
+          action: "ENTITY_EXTRACTION_FAILED",
+          actor: "AIMA",
+          metadata: {
+            detail: legalUpsert.error.message,
+            step: "legal_entities",
+          },
+        });
+      }
     }
 
     if (
@@ -971,85 +1017,53 @@ export async function processIntakeDocument(
       extracted.invoicePresent &&
       extracted.invoiceConfidence > 0
     ) {
-      rowsToUpsert.push({
+      const invoiceRow = {
         document_id: documentId,
-        entity_type: "invoice_core",
-        entities_json: extracted.invoice,
-        confidence: extracted.invoiceConfidence,
-        method: "rules",
-        invoice_number: extracted.invoice.invoice_number?.value ?? null,
-        invoice_date: extracted.invoice.invoice_date?.value ?? null,
+        bill_number: extracted.invoice.invoice_number?.value ?? null,
+        bill_date: extracted.invoice.invoice_date?.value ?? null,
         due_date: extracted.invoice.due_date?.value ?? null,
-        currency: extracted.invoice.currency?.value ?? null,
-        total_amount: extracted.invoice.total_amount?.value ?? null,
-        tax_amount: extracted.invoice.tax_amount?.value ?? null,
-        vendor_name: extracted.invoice.vendor_name?.value ?? null,
-        buyer_name: extracted.invoice.buyer_name?.value ?? null,
-      });
-    }
-    if (
-      extracted.legal &&
-      extracted.legalPresent &&
-      extracted.legalConfidence > 0
-    ) {
-      rowsToUpsert.push({
-        document_id: documentId,
-        entity_type: "legal_core",
-        entities_json: extracted.legal,
-        confidence: extracted.legalConfidence,
-        method: "rules",
-        case_number: extracted.legal.case_number?.value ?? null,
-        notice_date: extracted.legal.notice_date?.value ?? null,
-        authority: extracted.legal.authority?.value ?? null,
-        deadline: extracted.legal.deadline?.value ?? null,
-        reference_legal: extracted.legal.reference_legal?.value ?? null,
-        claimant_name: extracted.legal.claimant_name?.value ?? null,
-        respondent_name: extracted.legal.respondent_name?.value ?? null,
-        claimant_email: extracted.legal.claimant_email?.value ?? null,
-        respondent_email: extracted.legal.respondent_email?.value ?? null,
-        respondent_contact_name:
-          extracted.legal.respondent_contact_name?.value ?? null,
-        employment_start_date:
-          extracted.legal.employment_start_date?.value ?? null,
-        employment_end_date:
-          extracted.legal.employment_end_date?.value ?? null,
-        employment_status: extracted.legal.employment_status?.value ?? null,
-        occupation: extracted.legal.occupation?.value ?? null,
-        basic_salary_monthly:
-          extracted.legal.basic_salary_monthly?.value ?? null,
-      });
-    }
-
-    if (rowsToUpsert.length > 0) {
-      const entityUpsert = await db
-        .from("document_entities")
-        .upsert(rowsToUpsert, { onConflict: "document_id,entity_type" });
-
-      if (entityUpsert.error) {
+        currency: extracted.invoice.currency?.value ?? "SGD",
+        gst_amount: parseNumericForDb(extracted.invoice.tax_amount?.value),
+        total_amount_due: parseNumericForDb(
+          extracted.invoice.total_amount?.value,
+        ),
+        account_name:
+          extracted.invoice.vendor_name?.value ??
+          extracted.invoice.buyer_name?.value ??
+          null,
+        service_type: extracted.invoice.buyer_name?.value ?? null,
+      };
+      const invoiceUpsert = await db
+        .from("invoice_entities")
+        .upsert(invoiceRow, { onConflict: "document_id" });
+      if (invoiceUpsert.error) {
         await db.from("audit_logs").insert({
           entity_type: "document",
           entity_id: documentId,
           action: "ENTITY_EXTRACTION_FAILED",
           actor: "AIMA",
           metadata: {
-            detail: entityUpsert.error.message,
-          },
-        });
-      } else {
-        await db.from("audit_logs").insert({
-          entity_type: "document",
-          entity_id: documentId,
-          action: "ENTITY_EXTRACTION_COMPLETED",
-          actor: "AIMA",
-          metadata: {
-            universalConfidence: extracted.universalConfidence,
-            invoiceConfidence: extracted.invoiceConfidence,
-            invoicePresent: extracted.invoicePresent,
-            legalConfidence: extracted.legalConfidence,
-            legalPresent: extracted.legalPresent,
+            detail: invoiceUpsert.error.message,
+            step: "invoice_entities",
           },
         });
       }
+    }
+
+    if (!universalUpsert.error) {
+      await db.from("audit_logs").insert({
+        entity_type: "document",
+        entity_id: documentId,
+        action: "ENTITY_EXTRACTION_COMPLETED",
+        actor: "AIMA",
+        metadata: {
+          universalConfidence: extracted.universalConfidence,
+          invoiceConfidence: extracted.invoiceConfidence,
+          invoicePresent: extracted.invoicePresent,
+          legalConfidence: extracted.legalConfidence,
+          legalPresent: extracted.legalPresent,
+        },
+      });
     }
   } catch {
     // Non-fatal: keep intake success even if entity extraction fails.
