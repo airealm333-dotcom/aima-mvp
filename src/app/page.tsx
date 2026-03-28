@@ -43,6 +43,19 @@ type IntakeResponse = {
     claimant_email: string | null;
     respondent_email: string | null;
   } | null;
+  split?: {
+    parentRef: string | null;
+    index: number | null;
+    total: number | null;
+    method: string;
+    confidence: number | null;
+    suspectedMultiInvoice: boolean;
+    sectionType: string | null;
+    reason: string | null;
+    model: string | null;
+    pageStart: number | null;
+    pageEnd: number | null;
+  };
   error?: string;
   detail?: string;
 };
@@ -641,6 +654,66 @@ export default function Home() {
                   </button>
                 </div>
 
+                {splitUploadInfo ? (
+                  <p className="text-xs text-zinc-600 dark:text-zinc-400">
+                    <strong>Source PDF:</strong>{" "}
+                    <span className="break-all font-medium text-zinc-800 dark:text-zinc-200">
+                      {splitUploadInfo.sourceFileName}
+                    </span>
+                  </p>
+                ) : null}
+
+                {result.split &&
+                (splitUploadInfo != null ||
+                  (result.split.total ?? 0) > 1) ? (
+                  <div className="grid gap-1 rounded border border-zinc-200 bg-white/70 p-2 text-xs text-zinc-700 dark:border-zinc-700 dark:bg-zinc-950/40 dark:text-zinc-300">
+                    <div className="font-medium text-zinc-800 dark:text-zinc-200">
+                      PDF segment (split)
+                    </div>
+                    {result.split.total != null && result.split.total > 1 ? (
+                      <div>
+                        Split chunk {result.split.index ?? "?"}/
+                        {result.split.total} via{" "}
+                        {result.split.method ?? "unknown"}
+                        {result.split.confidence != null
+                          ? ` (${result.split.confidence}%)`
+                          : ""}
+                        {result.split.sectionType
+                          ? ` · ${result.split.sectionType}`
+                          : ""}
+                      </div>
+                    ) : (
+                      <div>
+                        Split analysis: single segment via{" "}
+                        {result.split.method ?? "unknown"}
+                        {result.split.confidence != null
+                          ? ` (${result.split.confidence}%)`
+                          : ""}
+                        {result.split.sectionType
+                          ? ` · ${result.split.sectionType}`
+                          : ""}
+                      </div>
+                    )}
+                    {result.split.pageStart != null &&
+                    result.split.pageEnd != null ? (
+                      <div>
+                        <strong>Pages in original PDF:</strong>{" "}
+                        {result.split.pageStart}–{result.split.pageEnd}
+                      </div>
+                    ) : null}
+                    {result.split.reason ? (
+                      <div>
+                        <strong>Split reason:</strong> {result.split.reason}
+                      </div>
+                    ) : null}
+                    {result.split.suspectedMultiInvoice ? (
+                      <div className="text-amber-800 dark:text-amber-200">
+                        Multi-invoice suspected — review recommended
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+
                 <div className="grid gap-2 rounded border border-emerald-200/80 bg-white/80 p-3 text-zinc-800 dark:border-emerald-800/50 dark:bg-zinc-950/40 dark:text-zinc-200">
                   <div>
                     <strong>Document type (D2):</strong>{" "}
@@ -822,6 +895,19 @@ export default function Home() {
                       <div>
                         <strong>Warning:</strong> Low OCR text coverage,
                         exception queued.
+                      </div>
+                    ) : null}
+                    {result.split?.parentRef ? (
+                      <div className="break-all">
+                        <strong>Split parent ref:</strong>{" "}
+                        <span className="font-mono text-xs">
+                          {result.split.parentRef}
+                        </span>
+                      </div>
+                    ) : null}
+                    {result.split?.model ? (
+                      <div>
+                        <strong>Split model:</strong> {result.split.model}
                       </div>
                     ) : null}
                     <div>

@@ -143,6 +143,8 @@ export async function runManualIntakeWithOptionalPdfSplit(
           sectionType: chunk.sectionType,
           reason: chunk.reason,
           model: splitCandidate?.model ?? null,
+          pageStart: chunk.pageStart,
+          pageEnd: chunk.pageEnd,
         },
       });
 

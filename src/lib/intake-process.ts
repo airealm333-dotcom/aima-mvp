@@ -208,7 +208,24 @@ export type ProcessIntakeInput = {
     sectionType?: string | null;
     reason?: string | null;
     model?: string | null;
+    /** 1-based inclusive; response metadata only (not stored on documents row). */
+    pageStart?: number | null;
+    pageEnd?: number | null;
   };
+};
+
+export type ProcessIntakeSuccessSplit = {
+  parentRef: string | null;
+  index: number | null;
+  total: number | null;
+  method: string;
+  confidence: number | null;
+  suspectedMultiInvoice: boolean;
+  sectionType: string | null;
+  reason: string | null;
+  model: string | null;
+  pageStart: number | null;
+  pageEnd: number | null;
 };
 
 export type ProcessIntakeSuccessBody = {
@@ -232,11 +249,31 @@ export type ProcessIntakeSuccessBody = {
     reason: string;
   };
   entitySummary?: IntakeEntitySummary | null;
+  split?: ProcessIntakeSuccessSplit;
 };
 
 export type ProcessIntakeResult =
   | { ok: true; status: 200; body: ProcessIntakeSuccessBody }
   | { ok: false; status: number; body: Record<string, unknown> };
+
+function splitToResponseBody(
+  split: ProcessIntakeInput["split"] | undefined,
+): ProcessIntakeSuccessSplit | undefined {
+  if (!split?.method) return undefined;
+  return {
+    parentRef: split.parentRef ?? null,
+    index: split.index ?? null,
+    total: split.total ?? null,
+    method: split.method,
+    confidence: split.confidence ?? null,
+    suspectedMultiInvoice: split.suspectedMultiInvoice === true,
+    sectionType: split.sectionType ?? null,
+    reason: split.reason ?? null,
+    model: split.model ?? null,
+    pageStart: split.pageStart ?? null,
+    pageEnd: split.pageEnd ?? null,
+  };
+}
 
 function normalizeContentType(contentType: string) {
   return contentType.split(";")[0]?.trim().toLowerCase() || "";
@@ -732,6 +769,7 @@ export async function processIntakeDocument(
           reason: "sha256_match",
         },
         entitySummary: duplicateEntitySummary,
+        split: splitToResponseBody(split),
       },
     };
   }
@@ -1188,6 +1226,7 @@ export async function processIntakeDocument(
         rationale: classification.rationale,
       },
       entitySummary,
+      split: splitToResponseBody(split),
     },
   };
 }
