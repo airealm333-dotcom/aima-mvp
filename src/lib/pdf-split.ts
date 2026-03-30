@@ -328,7 +328,7 @@ export async function splitPdfIntoLogicalSections(
       suspectedMultiInvoice: true,
       reason: `ocr_page_mismatch:${extracted.pageCount}/${totalPages}`,
       model:
-        process.env.ANTHROPIC_SPLIT_MODEL?.trim() || "claude-3-7-sonnet-latest",
+        process.env.ANTHROPIC_SPLIT_MODEL?.trim() || "claude-sonnet-4-6",
     };
   }
   if (!rawText.trim() || extracted.pageCount <= 0) {
@@ -339,7 +339,7 @@ export async function splitPdfIntoLogicalSections(
       suspectedMultiInvoice: true,
       reason: "ocr_no_text_or_pages",
       model:
-        process.env.ANTHROPIC_SPLIT_MODEL?.trim() || "claude-3-7-sonnet-latest",
+        process.env.ANTHROPIC_SPLIT_MODEL?.trim() || "claude-sonnet-4-6",
     };
   }
 
@@ -417,7 +417,7 @@ export async function splitPdfIntoLogicalSections(
     };
   }
   const model =
-    process.env.ANTHROPIC_SPLIT_MODEL?.trim() || "claude-3-7-sonnet-latest";
+    process.env.ANTHROPIC_SPLIT_MODEL?.trim() || "claude-sonnet-4-6";
 
   const ocrText = pageTexts
     .map((text, idx) => {

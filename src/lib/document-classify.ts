@@ -266,7 +266,7 @@ async function classifyWithLlm(
 
   const model =
     process.env.ANTHROPIC_CLASSIFICATION_MODEL?.trim() ||
-    "claude-3-7-sonnet-latest";
+    "claude-sonnet-4-6";
   const excerpt = ocrText.slice(0, 12_000);
 
   const client = new Anthropic({ apiKey });

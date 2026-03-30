@@ -27,7 +27,17 @@ export default function RootLayout({
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col">{children}</body>
+      <body className="flex min-h-full flex-col">
+        <nav className="flex gap-4 border-b border-zinc-200 px-4 py-2 text-sm dark:border-zinc-800">
+          <a className="underline" href="/">
+            Intake
+          </a>
+          <a className="underline" href="/ocr-clients">
+            OCR → clients
+          </a>
+        </nav>
+        {children}
+      </body>
     </html>
   );
 }

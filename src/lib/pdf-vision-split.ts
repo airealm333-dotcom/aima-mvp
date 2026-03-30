@@ -186,7 +186,7 @@ export async function splitPdfWithClaudeVision(input: {
   const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
   const model =
     process.env.ANTHROPIC_SPLIT_VISION_MODEL?.trim() ||
-    "claude-sonnet-4-20250514";
+    "claude-sonnet-4-6";
   if (!apiKey) {
     return {
       sections: null,

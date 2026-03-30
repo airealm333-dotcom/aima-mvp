@@ -391,7 +391,7 @@ export async function extractEntitiesWithLlm(
   if (!apiKey) return null;
 
   const model =
-    process.env.ANTHROPIC_ENTITY_MODEL?.trim() || "claude-3-7-sonnet-latest";
+    process.env.ANTHROPIC_ENTITY_MODEL?.trim() || "claude-sonnet-4-6";
   const excerpt = ocrText.slice(0, entityExcerptMaxChars());
 
   const keyLists = {
