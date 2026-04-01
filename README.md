@@ -37,7 +37,7 @@ Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/bui
 
 ## AIMA MVP (Intake → OCR → D2 classification)
 
-This repo includes an MVP intake flow through OCR and **D2 document classification** (rules-first, optional Anthropic LLM). Odoo and later workflow steps are out of scope.
+This repo includes an MVP intake flow through OCR and **D2 document classification** (rules-first, optional Anthropic LLM), optional **entity extraction (D2.5)** into typed tables, and optional **Odoo SOP D3 client matching** (JSON-RPC) after entities when classification is auto-approved.
 
 - **Primary (SOP):** Gmail messages in an **Unprocessed** label are polled on a schedule. First PDF/image attachment is stored in Supabase, OCR runs, `documents.gmail_message_id` is set, then the message is moved to **Processed**.
 - **Automation:** (1) Optional in-process poll while the server runs: set `GMAIL_AUTOPOLL_INTERVAL_MS` (e.g. `300000` for 5 minutes) — see `src/instrumentation.ts`. (2) On Vercel: `vercel.json` runs `/api/cron/intake-email` every 5 minutes; set `CRON_SECRET` in the project so Vercel sends `Authorization: Bearer …`. (3) Manual or OS cron: `POST`/`GET` `/api/cron/intake-email` with `CRON_SECRET`.
@@ -65,6 +65,17 @@ This repo includes an MVP intake flow through OCR and **D2 document classificati
    - **Entity extraction (D2.5):** `ENTITY_EXTRACTION_USE_LLM=true` to merge structured fields into `universal_info` / `legal_entities` / `invoice_entities` after rule extraction. Set **`ANTHROPIC_ENTITY_MODEL`** to the same model ID as classification if you rely on Sonnet 4.x (entity extraction uses a separate env var from `ANTHROPIC_CLASSIFICATION_MODEL`). Optional: `ENTITY_EXTRACTION_OCR_MAX_CHARS`, `ENTITY_EXTRACTION_LLM_OVERRIDE`. See `.env.example`. Audit actions `ENTITY_LLM_NO_EXTRACTABLE_FIELDS` / `ENTITY_LLM_EXTRACTION_FAILED` help debug empty or invalid JSON responses.
 10. Optional: set `GMAIL_AUTOPOLL_INTERVAL_MS=300000` in `.env.local` to poll Gmail every 5 minutes automatically while `npm run dev` or `npm run start` is running (do not rely on this on Vercel; use the included `vercel.json` cron instead).
 11. Run `npm run dev`.
+12. **Optional — Odoo client match (SOP D3):** Run [`sql/documents_odoo_match_columns.sql`](sql/documents_odoo_match_columns.sql) in Supabase, then set `ODOO_MATCH_ENABLED=true` and the other `ODOO_*` variables in `.env.local` (see `.env.example`). Matching runs only when **classification review is not required** (`D3_APPROVED` path). See [Odoo D3 smoke](#odoo-d3-smoke) below.
+
+### Odoo D3 smoke
+
+Use this after SQL migration and env configuration:
+
+1. In Odoo, confirm the API user can `search_read` on `res.partner` and read your custom fields (`x_uen`, `x_legal_name`, `x_trading_name` or your overrides).
+2. **Auth:** From a shell, `POST` to `https://<your-odoo>/jsonrpc` with `call` → `common` / `authenticate` and args `[database, username, api_key_or_password, {}]`; expect a numeric `result` (uid).
+3. **Partner read:** Same session: `object` / `execute_kw` with args `[db, uid, password, "res.partner", "search_read", [[["id", ">", 0]]], {"fields": ["id","name","x_uen"], "limit": 1}]` (adjust field names).
+4. In the app, ingest a document that populates `universal_info.recipient_uen` (LLM) or contains a `UEN` line in OCR text, with **auto-approved** classification. Check `documents.odoo_*` columns and `audit_logs` for `ODOO_CLIENT_MATCHED` or `ODOO_CLIENT_MATCH_*` / `exceptions` types `E1_CLIENT_NOT_MATCHED`, `E2_CLIENT_AMBIGUOUS`, `E3_ODOO_CLIENT_MATCH_ERROR`.
+5. **Unit tests:** `npm run test` (pure matching helpers; no live Odoo).
 
 ### Supabase: documents classification columns
 

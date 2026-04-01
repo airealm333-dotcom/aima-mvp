@@ -378,6 +378,13 @@ function entityExcerptMaxChars(): number {
   return Number.isFinite(n) && n > 2000 ? n : 28000;
 }
 
+function safeDebugPreview(raw: string): string {
+  return raw
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[redacted_email]")
+    .replace(/\b\d{6,}\b/g, "[redacted_number]")
+    .slice(0, 1200);
+}
+
 /**
  * Optional Anthropic extraction: structured fields for universal_info / legal_entities / invoice_entities.
  * Returns null if disabled, no API key, parse failure, or API error (caller should catch throws).
@@ -410,13 +417,18 @@ Legal / tribunal (e.g. ECT): claimant_name and respondent_name must be the actua
   const userMsg = `You extract structured data from registered-office mail OCR. The document was classified as: ${classificationLabel}.
 
 Semantic field meanings (universal):
-- recipient_name / sender_name: directional — who the mail is addressed TO on the envelope or "TO:" block vs who ISSUED it (letterhead / "FROM:" / government agency).
+- recipient_name / sender_name: directional and strict.
+  - recipient_name = company the letter is addressed TO (address block at top, after "To:").
+  - sender_name = company/person that SENT the letter (letterhead/logo/signature block).
+  - Do NOT confuse sender_name with recipient_name.
 - organization_name: the client COMPANY or legal entity the matter concerns (often the addressee company or name after "Re:", UEN block, or registered-office client). Use null if only a person is named with no clear entity.
-- contact_person_name: a natural PERSON only when explicitly labeled (e.g. Attn:, Attention:, Dear Mr/Ms, signatory line). Use null if unclear or not present.
+- contact_person_name: a natural PERSON only when explicitly labeled (e.g. Attn:, Attention:, Dear Mr/Ms, signatory line). For "Attention: Kiran Sreedharan (Spade Consulting Pte. Ltd.)", use "Kiran Sreedharan".
+- If an "Attention:" line includes a company distinct from recipient_name, use that company as organization_name (e.g. "Spade Consulting Pte. Ltd.").
 ${legalPartyHint}
 Rules:
 - Use ONLY information clearly present in the OCR. If a field is not in the text, use null.
 - Do not invent UENs, amounts, dates, or names.
+- Extract as many available fields as possible for recipient, sender, references, dates, legal parties, and account holder details.
 - Return ONLY valid JSON (no markdown): an object with exactly three keys "universal", "legal", "invoice". Each value is an object whose keys MUST be chosen only from the allowed lists below; omit keys you cannot fill.
 
 Allowed keys for "universal": ${keyLists.universal}
@@ -442,9 +454,79 @@ ${excerpt}
   const block = resp.content[0];
   const text = block?.type === "text" ? block.text : "";
   const trimmed = text.trim();
+  // #region agent log
+  fetch("http://127.0.0.1:7413/ingest/554872b6-b526-4f4b-85dd-aaf0b37e62cd", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Debug-Session-Id": "392735",
+    },
+    body: JSON.stringify({
+      sessionId: "392735",
+      runId: "pre-fix",
+      hypothesisId: "H1_claude_empty_or_non_json",
+      location: "entity-extraction-llm.ts:445",
+      message: "=== CLAUDE RAW RESPONSE ===",
+      data: {
+        hasTextBlock: block?.type === "text",
+        rawLength: trimmed.length,
+        rawPreview: safeDebugPreview(trimmed),
+      },
+      timestamp: Date.now(),
+    }),
+  }).catch(() => {});
+  // #endregion
   const parsed = parseRawLlmJson(text);
+  // #region agent log
+  fetch("http://127.0.0.1:7413/ingest/554872b6-b526-4f4b-85dd-aaf0b37e62cd", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Debug-Session-Id": "392735",
+    },
+    body: JSON.stringify({
+      sessionId: "392735",
+      runId: "pre-fix",
+      hypothesisId: "H2_json_parse_failed",
+      location: "entity-extraction-llm.ts:465",
+      message: "=== PARSED JSON ===",
+      data: {
+        parseOk: parsed != null,
+        parsedType: parsed == null ? "null" : typeof parsed,
+        parsedKeys:
+          parsed && typeof parsed === "object"
+            ? Object.keys(parsed as Record<string, unknown>)
+            : [],
+      },
+      timestamp: Date.now(),
+    }),
+  }).catch(() => {});
+  // #endregion
   if (trimmed.length > 0 && parsed == null) {
     throw new Error("ENTITY_LLM_JSON_PARSE_FAILED");
   }
-  return normalizeLlmPayload(parsed);
+  const normalized = normalizeLlmPayload(parsed);
+  // #region agent log
+  fetch("http://127.0.0.1:7413/ingest/554872b6-b526-4f4b-85dd-aaf0b37e62cd", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Debug-Session-Id": "392735",
+    },
+    body: JSON.stringify({
+      sessionId: "392735",
+      runId: "pre-fix",
+      hypothesisId: "H3_normalization_dropped_values",
+      location: "entity-extraction-llm.ts:491",
+      message: "=== EXTRACTED ENTITIES ===",
+      data: {
+        universalKeys: Object.keys(normalized?.universal ?? {}),
+        legalKeys: Object.keys(normalized?.legal ?? {}),
+        invoiceKeys: Object.keys(normalized?.invoice ?? {}),
+      },
+      timestamp: Date.now(),
+    }),
+  }).catch(() => {});
+  // #endregion
+  return normalized;
 }

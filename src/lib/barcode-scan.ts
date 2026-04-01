@@ -171,6 +171,8 @@ export async function scanPdfBarcodeStartPages(
   const reader = buildReader(cfg.formats);
   const evidence: BarcodeEvidence[] = [];
   const boundaryPages = new Set<number>();
+  let decodedButFiltered = 0;
+  let decodeHits = 0;
 
   try {
     for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
@@ -205,8 +207,12 @@ export async function scanPdfBarcodeStartPages(
       const region: "top" | "full" = topDecoded ? "top" : "full";
 
       if (!decoded) continue;
+      decodeHits += 1;
       const value = decoded.getText()?.trim() ?? "";
-      if (!isLikelyBoundaryBarcode(value, cfg.minValueLength)) continue;
+      if (!isLikelyBoundaryBarcode(value, cfg.minValueLength)) {
+        decodedButFiltered += 1;
+        continue;
+      }
 
       boundaryPages.add(pageNumber);
       evidence.push({
@@ -222,10 +228,17 @@ export async function scanPdfBarcodeStartPages(
   }
 
   const startPages = Array.from(boundaryPages).sort((a, b) => a - b);
+  const reason =
+    startPages.length > 0
+      ? "barcode_image_detected"
+      : decodeHits > 0 && decodedButFiltered > 0
+        ? "barcode_decoded_but_filtered"
+        : decodeHits > 0
+          ? "barcode_decoded_no_boundary_match"
+          : "barcode_decode_failed_or_not_found";
   return {
     startPages,
     evidence,
-    reason:
-      startPages.length > 0 ? "barcode_image_detected" : "barcode_not_found",
+    reason,
   };
 }

@@ -7,9 +7,16 @@
     "build": "next build",
     "start": "next start",
     "lint": "biome check",
+    "test": "vitest run",
     "format": "biome format --write",
     "ocr-pdf": "tsx scripts/ocr-pdf.ts",
-    "extract-ocr-clients": "tsx scripts/extract-ocr-clients.ts"
+    "extract-ocr-clients": "tsx scripts/extract-ocr-clients.ts",
+    "test-odoo": "tsx src/test-odoo.ts",
+    "test-d3-d4": "tsx scripts/test-d3-d4-match.ts",
+    "test-industria-contacts": "tsx src/test-industria-contacts.ts",
+    "add-industria-contact": "tsx src/add-industria-contact.ts",
+    "find-taavi-contact": "tsx src/find-taavi-contact.ts",
+    "check-taavi-email": "tsx src/check-taavi-email.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.80.0",
@@ -19,11 +26,13 @@
     "@supabase/auth-helpers-nextjs": "^0.15.0",
     "@supabase/supabase-js": "^2.99.3",
     "@zxing/library": "^0.21.3",
+    "dotenv": "^17.3.1",
     "form-data": "^4.0.5",
     "google-auth-library": "^10.6.2",
     "googleapis": "^171.4.0",
     "next": "16.2.1",
     "node-fetch": "^3.3.2",
+    "odoo-xmlrpc": "^1.0.8",
     "pdf-lib": "^1.17.1",
     "pdf-parse": "^2.4.5",
     "pdf2pic": "^3.2.0",
@@ -38,6 +47,8 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "tsx": "^4.21.0",
+    "typescript": "^5",
+    "vitest": "^2.1.9"
   }
 }

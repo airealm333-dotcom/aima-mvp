@@ -44,118 +44,72 @@ export async function GET() {
       return NextResponse.json({ items: [] });
     }
 
-    const [uniRes, legRes, invRes] = await Promise.all([
-      supabase.client
-        .from("universal_info")
-        .select(
-          "document_id, sender_name, recipient_name, organization_name, contact_person_name, reference_number, document_date, document_type, deadline_date",
-        )
-        .in("document_id", documentIds),
-      supabase.client
-        .from("legal_entities")
-        .select(
-          "document_id, case_number, court_name, claimant_name, claimant_email, respondent_name, respondent_email, respondent_contact, employment_start_date, employment_end_date, occupation, basic_salary",
-        )
-        .in("document_id", documentIds),
-      supabase.client
-        .from("invoice_entities")
-        .select(
-          "document_id, bill_number, bill_date, due_date, currency, gst_amount, total_amount_due, account_name, service_type",
-        )
-        .in("document_id", documentIds),
-    ]);
+    const entitiesRes = await supabase.client
+      .from("document_entities")
+      .select(
+        "document_id, sender_name, recipient_name, organization_name, contact_person_name, reference_number, document_date, document_type, deadline_date, claimant_name, claimant_email, respondent_name, respondent_email, account_name",
+      )
+      .in("document_id", documentIds);
 
-    if (uniRes.error || legRes.error || invRes.error) {
+    if (entitiesRes.error) {
       return NextResponse.json({ items: documents });
     }
 
-    const s = (v: unknown) =>
-      v != null && v !== "" ? String(v) : null;
+    const s = (v: unknown) => (v != null && v !== "" ? String(v) : null);
 
-    const uniByDoc = Object.fromEntries(
-      (uniRes.data ?? []).map((r: Record<string, unknown>) => [
-        r.document_id as string,
-        r,
-      ]),
-    );
-    const legByDoc = Object.fromEntries(
-      (legRes.data ?? []).map((r: Record<string, unknown>) => [
-        r.document_id as string,
-        r,
-      ]),
-    );
-    const invByDoc = Object.fromEntries(
-      (invRes.data ?? []).map((r: Record<string, unknown>) => [
+    const entitiesByDoc = Object.fromEntries(
+      (entitiesRes.data ?? []).map((r: Record<string, unknown>) => [
         r.document_id as string,
         r,
       ]),
     );
 
     const items = documents.map((doc) => {
-      const u = uniByDoc[doc.id] as Record<string, unknown> | undefined;
-      const leg = legByDoc[doc.id] as Record<string, unknown> | undefined;
-      const inv = invByDoc[doc.id] as Record<string, unknown> | undefined;
+      const e = entitiesByDoc[doc.id] as Record<string, unknown> | undefined;
 
       return {
         ...doc,
-        entity_sender: u?.sender_name != null ? s(u.sender_name) : null,
+        entity_sender: e?.sender_name != null ? s(e.sender_name) : null,
         entity_addressee:
-          u?.recipient_name != null ? s(u.recipient_name) : null,
+          e?.recipient_name != null ? s(e.recipient_name) : null,
         entity_organization_name:
-          u?.organization_name != null ? s(u.organization_name) : null,
+          e?.organization_name != null ? s(e.organization_name) : null,
         entity_contact_person_name:
-          u?.contact_person_name != null ? s(u.contact_person_name) : null,
+          e?.contact_person_name != null ? s(e.contact_person_name) : null,
         entity_reference_number:
-          u?.reference_number != null ? s(u.reference_number) : null,
+          e?.reference_number != null ? s(e.reference_number) : null,
         entity_document_date:
-          u?.document_date != null ? s(u.document_date) : null,
+          e?.document_date != null ? s(e.document_date) : null,
         entity_document_type:
-          u?.document_type != null ? s(u.document_type) : null,
+          e?.document_type != null ? s(e.document_type) : null,
 
-        entity_invoice_number:
-          inv?.bill_number != null ? s(inv.bill_number) : null,
-        entity_invoice_date:
-          inv?.bill_date != null ? s(inv.bill_date) : null,
-        entity_due_date: inv?.due_date != null ? s(inv.due_date) : null,
-        entity_currency: inv?.currency != null ? s(inv.currency) : null,
-        entity_total_amount:
-          inv?.total_amount_due != null ? s(inv.total_amount_due) : null,
-        entity_tax_amount:
-          inv?.gst_amount != null ? s(inv.gst_amount) : null,
-        entity_vendor_name:
-          inv?.account_name != null ? s(inv.account_name) : null,
-        entity_buyer_name:
-          inv?.service_type != null ? s(inv.service_type) : null,
+        entity_invoice_number: null,
+        entity_invoice_date: null,
+        entity_due_date: null,
+        entity_currency: null,
+        entity_total_amount: null,
+        entity_tax_amount: null,
+        entity_vendor_name: e?.account_name != null ? s(e.account_name) : null,
+        entity_buyer_name: null,
 
-        entity_case_number:
-          leg?.case_number != null ? s(leg.case_number) : null,
+        entity_case_number: null,
         entity_notice_date: null,
-        entity_authority: leg?.court_name != null ? s(leg.court_name) : null,
-        entity_deadline:
-          u?.deadline_date != null ? s(u.deadline_date) : null,
+        entity_authority: null,
+        entity_deadline: e?.deadline_date != null ? s(e.deadline_date) : null,
         entity_claimant_name:
-          leg?.claimant_name != null ? s(leg.claimant_name) : null,
+          e?.claimant_name != null ? s(e.claimant_name) : null,
         entity_respondent_name:
-          leg?.respondent_name != null ? s(leg.respondent_name) : null,
+          e?.respondent_name != null ? s(e.respondent_name) : null,
         entity_claimant_email:
-          leg?.claimant_email != null ? s(leg.claimant_email) : null,
+          e?.claimant_email != null ? s(e.claimant_email) : null,
         entity_respondent_email:
-          leg?.respondent_email != null ? s(leg.respondent_email) : null,
-        entity_respondent_contact_name:
-          leg?.respondent_contact != null ? s(leg.respondent_contact) : null,
-        entity_employment_start_date:
-          leg?.employment_start_date != null
-            ? s(leg.employment_start_date)
-            : null,
-        entity_employment_end_date:
-          leg?.employment_end_date != null
-            ? s(leg.employment_end_date)
-            : null,
+          e?.respondent_email != null ? s(e.respondent_email) : null,
+        entity_respondent_contact_name: null,
+        entity_employment_start_date: null,
+        entity_employment_end_date: null,
         entity_employment_status: null,
-        entity_occupation:
-          leg?.occupation != null ? s(leg.occupation) : null,
-        entity_basic_salary_monthly:
-          leg?.basic_salary != null ? s(leg.basic_salary) : null,
+        entity_occupation: null,
+        entity_basic_salary_monthly: null,
         entity_reference_legal: null,
       };
     });

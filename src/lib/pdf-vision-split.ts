@@ -9,11 +9,19 @@ import { fromPath } from "pdf2pic";
 type VisionPageEntities = {
   recipientName?: string | null;
   recipientUEN?: string | null;
+  recipientAddress?: string | null;
   senderName?: string | null;
+  contactPersonName?: string | null;
+  organizationName?: string | null;
   documentDate?: string | null;
   referenceNumber?: string | null;
-  amountDue?: number | null;
-  deadline?: string | null;
+  deadlineDate?: string | null;
+  subjectLine?: string | null;
+  claimantName?: string | null;
+  claimantEmail?: string | null;
+  respondentName?: string | null;
+  respondentEmail?: string | null;
+  accountName?: string | null;
 };
 
 type VisionPageResult = {
@@ -33,27 +41,50 @@ type VisionSplitSection = {
   reason: string;
 };
 
-function getVisionPrompt() {
-  return `Analyze this scanned document page. Return JSON only:
+function getVisionPrompt(prevResult?: VisionPageResult | null) {
+  const contextLine = prevResult
+    ? `CONTEXT: The previous page was a ${prevResult.documentType ?? "UNKNOWN"} document (isNewDocument was ${prevResult.isNewDocument}, confidence ${prevResult.confidence ?? "?"}). Sender was "${prevResult.entities?.senderName ?? "unknown"}".`
+    : "CONTEXT: This is the FIRST page of the PDF. isNewDocument must be true.";
+
+  return `${contextLine}
+
+Extract ALL available information from this document page.
+Return JSON only:
 {
   "fullText": "complete OCR text from this page",
   "isNewDocument": true/false,
-  "documentType": "IRAS|ACRA|MOM|LEGAL|BANK|UTILITY|UNKNOWN",
+  "documentType": "LEGAL|IRAS|ACRA|MOM|BANK_FINANCIAL|UTILITY|UNKNOWN",
   "entities": {
-    "recipientName": "company name or null",
+    "recipientName": "company the letter is addressed TO (top address block, after 'To:') or null",
     "recipientUEN": "9-digit UEN or null",
-    "senderName": "sender or null",
+    "recipientAddress": "full recipient address block or null",
+    "senderName": "company/person who SENT the letter (letterhead/logo/signature block) or null",
+    "contactPersonName": "person in Attention/Attn line or null",
+    "organizationName": "company in Attention line (e.g. in parentheses) if different from recipient, else null",
+    "subjectLine": "RE line, subject line, or document title or null",
     "documentDate": "YYYY-MM-DD or null",
     "referenceNumber": "ref number or null",
-    "amountDue": number or null,
-    "deadline": "YYYY-MM-DD or null"
+    "deadlineDate": "YYYY-MM-DD or null",
+    "claimantName": "for legal docs or null",
+    "claimantEmail": "email or null",
+    "respondentName": "for legal docs or null",
+    "respondentEmail": "email or null",
+    "accountName": "for bank/utility docs or null"
   },
   "pageIndicator": "Page X of Y or null",
   "confidence": 0-100
 }
 
 NEW document: new letterhead, "Page 1 of X", different sender
-CONTINUATION: same letterhead, "Page 2 of X", content continues`;
+CONTINUATION: same letterhead, "Page 2 of X", content continues
+
+Directionality rules (strict):
+- The RECIPIENT is the company in the address block at the top (after "To:").
+- The SENDER is the company on the letterhead/logo or signature block.
+- contactPersonName is the named individual in "Attention:".
+- organizationName is the company in the Attention line when distinct from recipient.
+- recipientName and senderName should usually be different companies.
+- Do NOT confuse sender with recipient.`;
 }
 
 function extractTextContent(
@@ -210,10 +241,11 @@ export async function splitPdfWithClaudeVision(input: {
   }
 
   const client = new Anthropic({ apiKey });
-  const prompt = getVisionPrompt();
   const pageResults: VisionPageResult[] = [];
 
   for (let i = 0; i < pageBase64.length; i += 1) {
+    const prevResult = i > 0 ? (pageResults[i - 1] ?? null) : null;
+    const prompt = getVisionPrompt(prevResult);
     try {
       const response = await client.messages.create({
         model,
@@ -258,14 +290,26 @@ export async function splitPdfWithClaudeVision(input: {
     }
   }
 
+  function extractCoreNumber(ref: string): string {
+    const nums = ref.match(/\d+/g) ?? [];
+    if (nums.length === 0) return ref.toLowerCase().replace(/\W/g, "");
+    return nums.reduce((a, b) => (a.length >= b.length ? a : b));
+  }
+
   const startPages = [1];
+  let currentRef = pageResults[0]?.entities?.referenceNumber ?? null;
   for (let i = 1; i < pageResults.length; i += 1) {
     const p = pageResults[i];
-    const pageIndicatorReset =
-      typeof p.pageIndicator === "string" &&
-      /page\s*1\s*of/i.test(p.pageIndicator);
-    if (p.isNewDocument || pageIndicatorReset) {
+    const pageRef = p.entities?.referenceNumber ?? null;
+    const refChanged =
+      pageRef !== null &&
+      currentRef !== null &&
+      extractCoreNumber(pageRef) !== extractCoreNumber(currentRef);
+    if (p.isNewDocument || refChanged) {
       startPages.push(i + 1);
+    }
+    if (pageRef !== null) {
+      currentRef = pageRef;
     }
   }
 
@@ -278,11 +322,11 @@ export async function splitPdfWithClaudeVision(input: {
     console.info("[pdf-vision-split] start_pages", startPages);
     console.info("[pdf-vision-split] sections", sections);
   }
-  if (sections.length <= 1) {
+  if (sections.length === 0) {
     return {
       sections: null,
       model,
-      reason: "vision_split_single_or_inconclusive",
+      reason: "vision_split_no_sections",
     };
   }
   return { sections, model, reason: "vision_split_detected_boundaries" };

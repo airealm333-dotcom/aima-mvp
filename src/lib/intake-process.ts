@@ -3,17 +3,18 @@ import {
   type ClassificationLabel,
   classifyDocumentFromOcr,
 } from "@/lib/document-classify";
+import { extractDocumentEntitiesFromOcrText } from "@/lib/document-entities";
 import {
   countLlmBucketValues,
   extractEntitiesWithLlm,
   mergeEntityRows,
-  rowHasExtractableFields,
   UNIVERSAL_PROTECTED_KEYS,
 } from "@/lib/entity-extraction-llm";
-import { extractDocumentEntitiesFromOcrText } from "@/lib/document-entities";
+import type { OdooMatchIntakeSummary } from "@/lib/intake-odoo-match";
 import { buildDrid, buildMrid } from "@/lib/mail-id";
 import type { OcrResult } from "@/lib/ocr";
 import { extractPdfText } from "@/lib/ocr";
+import { processClientMatching } from "@/lib/process-d3-d4";
 import type { SupabaseAdminBundle } from "@/lib/supabase-admin";
 
 const OCR_MIN_TEXT_LENGTH = 30;
@@ -32,22 +33,20 @@ function strField(v: unknown): string | null {
 
 /** Intake API summary after rule + optional LLM merge (matches DB row shape). */
 function buildEntitySummaryFromDbRows(
-  universal: Record<string, unknown>,
-  legal: Record<string, unknown>,
-  invoice: Record<string, unknown>,
+  entities: Record<string, unknown>,
 ): IntakeEntitySummary {
   return {
     client_name:
-      strField(legal.claimant_name) ??
-      strField(universal.sender_name) ??
-      strField(invoice.account_name) ??
+      strField(entities.claimant_name) ??
+      strField(entities.sender_name) ??
+      strField(entities.account_name) ??
       null,
     company_name:
-      strField(legal.respondent_name) ??
-      strField(universal.recipient_name) ??
+      strField(entities.respondent_name) ??
+      strField(entities.organization_name) ??
       null,
-    claimant_email: strField(legal.claimant_email),
-    respondent_email: strField(legal.respondent_email),
+    claimant_email: strField(entities.claimant_email),
+    respondent_email: strField(entities.respondent_email),
   };
 }
 
@@ -64,44 +63,26 @@ type LooseSupabaseClient = {
   };
 };
 
-function parseNumericForDb(v: string | null | undefined): number | null {
-  if (v == null || v === "") return null;
-  const n = Number(String(v).replace(/,/g, ""));
-  return Number.isFinite(n) ? n : null;
-}
-
 async function fetchEntitySummaryFromTables(
   db: LooseSupabaseClient,
   documentId: string,
 ): Promise<IntakeEntitySummary | null> {
   try {
-    const [uRes, lRes, iRes] = await Promise.all([
-      db
-        .from("universal_info")
-        .select("sender_name, recipient_name")
-        .eq("document_id", documentId)
-        .maybeSingle(),
-      db
-        .from("legal_entities")
-        .select("claimant_name, respondent_name, claimant_email, respondent_email")
-        .eq("document_id", documentId)
-        .maybeSingle(),
-      db
-        .from("invoice_entities")
-        .select("account_name")
-        .eq("document_id", documentId)
-        .maybeSingle(),
-    ]);
-    const u = uRes.data as Record<string, unknown> | null;
-    const l = lRes.data as Record<string, unknown> | null;
-    const i = iRes.data as Record<string, unknown> | null;
+    const res = await db
+      .from("document_entities")
+      .select(
+        "sender_name, organization_name, claimant_name, claimant_email, respondent_name, respondent_email, account_name",
+      )
+      .eq("document_id", documentId)
+      .maybeSingle();
+    const e = res.data as Record<string, unknown> | null;
     const s = (x: unknown) => (typeof x === "string" ? x : null);
     const client_name =
-      s(l?.claimant_name) ?? s(u?.sender_name) ?? s(i?.account_name) ?? null;
+      s(e?.claimant_name) ?? s(e?.sender_name) ?? s(e?.account_name) ?? null;
     const company_name =
-      s(l?.respondent_name) ?? s(u?.recipient_name) ?? null;
-    const claimant_email = s(l?.claimant_email);
-    const respondent_email = s(l?.respondent_email);
+      s(e?.respondent_name) ?? s(e?.organization_name) ?? null;
+    const claimant_email = s(e?.claimant_email);
+    const respondent_email = s(e?.respondent_email);
     if (!client_name && !company_name && !claimant_email && !respondent_email)
       return null;
     return {
@@ -115,53 +96,28 @@ async function fetchEntitySummaryFromTables(
   }
 }
 
-async function copyTypedEntityTablesFromCanonical(
+async function copyDocumentEntitiesFromCanonical(
   db: LooseSupabaseClient,
   canonicalDocumentId: string,
   newDocumentId: string,
   newDrid: string,
   newMrid: string,
 ): Promise<void> {
-  const u = await db
-    .from("universal_info")
+  const res = await db
+    .from("document_entities")
     .select("*")
     .eq("document_id", canonicalDocumentId)
     .maybeSingle();
-  if (u.data && !u.error) {
-    const row = { ...(u.data as Record<string, unknown>) };
-    delete row.id;
+  if (res.data && !res.error) {
+    const row = { ...(res.data as Record<string, unknown>) };
     delete row.created_at;
     delete row.updated_at;
     row.document_id = newDocumentId;
     row.drid = newDrid;
     row.mrid = newMrid;
-    await db.from("universal_info").upsert(row, { onConflict: "document_id" });
-  }
-
-  const l = await db
-    .from("legal_entities")
-    .select("*")
-    .eq("document_id", canonicalDocumentId)
-    .maybeSingle();
-  if (l.data && !l.error) {
-    const row = { ...(l.data as Record<string, unknown>) };
-    delete row.id;
-    delete row.created_at;
-    row.document_id = newDocumentId;
-    await db.from("legal_entities").upsert(row, { onConflict: "document_id" });
-  }
-
-  const inv = await db
-    .from("invoice_entities")
-    .select("*")
-    .eq("document_id", canonicalDocumentId)
-    .maybeSingle();
-  if (inv.data && !inv.error) {
-    const row = { ...(inv.data as Record<string, unknown>) };
-    delete row.id;
-    delete row.created_at;
-    row.document_id = newDocumentId;
-    await db.from("invoice_entities").upsert(row, { onConflict: "document_id" });
+    await db
+      .from("document_entities")
+      .upsert(row, { onConflict: "document_id" });
   }
 }
 
@@ -250,6 +206,8 @@ export type ProcessIntakeSuccessBody = {
   };
   entitySummary?: IntakeEntitySummary | null;
   split?: ProcessIntakeSuccessSplit;
+  /** Present when Odoo SOP D3 matching is enabled or was gated/skipped with a reason. */
+  odooMatch?: OdooMatchIntakeSummary;
 };
 
 export type ProcessIntakeResult =
@@ -321,6 +279,14 @@ type CanonicalDocument = {
   status: string | null;
 };
 
+/** Classification labels that skip D3 review when confidence is at least 90%. */
+const HIGH_CONFIDENCE_SKIP_REVIEW_LABELS = new Set<ClassificationLabel>([
+  "IRAS",
+  "ACRA",
+  "MOM",
+  "LEGAL",
+]);
+
 function shouldRequireD3Review(input: {
   label: ClassificationLabel | string | null | undefined;
   confidence: number | null | undefined;
@@ -329,8 +295,22 @@ function shouldRequireD3Review(input: {
 }) {
   if (input.isDuplicate) return true;
   if (input.hasOpenException) return true;
-  if ((input.label ?? "UNKNOWN") === "UNKNOWN") return true;
-  return (input.confidence ?? 0) < 90;
+  const label = input.label ?? "UNKNOWN";
+  if (label === "UNKNOWN") return true;
+  const conf = input.confidence ?? 0;
+  if (HIGH_CONFIDENCE_SKIP_REVIEW_LABELS.has(label as ClassificationLabel)) {
+    if (conf < 90) {
+      console.log(
+        `[Review] ${label} document with low confidence, review required`,
+      );
+      return true;
+    }
+    console.log(
+      `[Review] ${label} document with high confidence (>=90%), skipping review`,
+    );
+    return false;
+  }
+  return conf < 90;
 }
 
 async function findCanonicalDocumentBySha(
@@ -696,9 +676,9 @@ export async function processIntakeDocument(
       };
     }
 
-    // Best-effort: copy universal_info / legal_entities / invoice_entities from canonical.
+    // Best-effort: copy consolidated document_entities from canonical.
     try {
-      await copyTypedEntityTablesFromCanonical(
+      await copyDocumentEntitiesFromCanonical(
         db,
         canonicalDocument.id,
         documentId,
@@ -708,7 +688,7 @@ export async function processIntakeDocument(
       await db.from("audit_logs").insert({
         entity_type: "document",
         entity_id: documentId,
-        action: "ENTITY_EXTRACTION_COPIED_FROM_CANONICAL",
+        action: "DOCUMENT_ENTITIES_COPIED_FROM_CANONICAL",
         actor: "AIMA",
         metadata: {
           duplicateOfDocumentId: canonicalDocument.id,
@@ -968,90 +948,96 @@ export async function processIntakeDocument(
 
   // D2.5 Entity extraction (best-effort, non-fatal).
   let entitySummary: IntakeEntitySummary | null = null;
+  let odooMatchSummary: OdooMatchIntakeSummary | null = null;
   try {
+    console.log("=== ENTITY EXTRACTION STARTED ===", {
+      documentId,
+      drid,
+      splitIndex: split?.index ?? null,
+      splitTotal: split?.total ?? null,
+      splitMethod: split?.method ?? null,
+    });
     const extracted = extractDocumentEntitiesFromOcrText(
       ocr.text,
       classification.label,
     );
+    // #region agent log
+    fetch("http://127.0.0.1:7413/ingest/554872b6-b526-4f4b-85dd-aaf0b37e62cd", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Debug-Session-Id": "392735",
+      },
+      body: JSON.stringify({
+        sessionId: "392735",
+        runId: "pre-fix",
+        hypothesisId: "H4_rule_extraction_empty_or_wrong_bucket",
+        location: "intake-process.ts:939",
+        message: "=== EXTRACTED ENTITIES ===",
+        data: {
+          classificationLabel: classification.label,
+          universalKeys: Object.keys(extracted.universal ?? {}),
+          legalKeys: extracted.legal ? Object.keys(extracted.legal) : [],
+          invoiceKeys: extracted.invoice ? Object.keys(extracted.invoice) : [],
+          legalPresent: extracted.legalPresent,
+          invoicePresent: extracted.invoicePresent,
+        },
+        timestamp: Date.now(),
+      }),
+    }).catch(() => {});
+    // #endregion
 
     const docTypeForRow =
       extracted.universal.document_type?.value ?? classification.label;
 
-    const universalRow: Record<string, unknown> = {
+    const entitiesRow: Record<string, unknown> = {
       document_id: documentId,
       drid,
       mrid,
       full_text: ocr.text,
-      recipient_name: extracted.universal.addressee?.value ?? null,
-      organization_name: extracted.universal.organization_name?.value ?? null,
-      contact_person_name: extracted.universal.contact_person_name?.value ?? null,
-      sender_name: extracted.universal.sender?.value ?? null,
-      reference_number: extracted.universal.reference_number?.value ?? null,
-      document_date: extracted.universal.document_date?.value ?? null,
       document_type: docTypeForRow,
       classification_confidence: Math.round(classification.confidence),
-      deadline_date: extracted.legal?.deadline?.value ?? null,
-      action_required: Boolean(extracted.legal?.deadline?.value),
+      organization_name: extracted.universal.organization_name?.value ?? null,
+      recipient_name: extracted.universal.addressee?.value ?? null,
+      recipient_address: extracted.universal.recipient_address?.value ?? null,
+      sender_name: extracted.universal.sender?.value ?? null,
+      subject_line: extracted.universal.subject_line?.value ?? null,
+      contact_person_name:
+        extracted.universal.contact_person_name?.value ?? null,
+      recipient_uen: extracted.universal.recipient_uen?.value ?? null,
+      reference_number: extracted.universal.reference_number?.value ?? null,
+      claimant_name: extracted.legal?.claimant_name?.value ?? null,
+      claimant_email: extracted.legal?.claimant_email?.value ?? null,
+      respondent_name: extracted.legal?.respondent_name?.value ?? null,
+      respondent_email: extracted.legal?.respondent_email?.value ?? null,
+      document_date: extracted.universal.document_date?.value ?? null,
+      deadline_date:
+        extracted.legal?.deadline?.value ??
+        extracted.invoice?.due_date?.value ??
+        null,
+      action_required: Boolean(
+        extracted.legal?.deadline?.value ?? extracted.invoice?.due_date?.value,
+      ),
+      account_name:
+        extracted.invoice?.vendor_name?.value ??
+        extracted.invoice?.buyer_name?.value ??
+        null,
       page_count: ocr.pageCount,
       page_start: ocr.pageCount > 0 ? 1 : null,
       page_end: ocr.pageCount > 0 ? ocr.pageCount : null,
       pdf_path: storagePath,
       original_pdf_path: storagePath,
+      attachment_hash: sha256,
+      match_confidence: null,
+      odoo_partner_id: null,
+      odoo_contact_email: null,
+      dispatch_date: null,
+      email_message_id: null,
+      priority: "MEDIUM",
+      status: "D2_CLASSIFIED",
     };
 
-    const ruleLegal =
-      Boolean(extracted.legal) &&
-      extracted.legalPresent &&
-      extracted.legalConfidence > 0;
-
-    const legalRow: Record<string, unknown> = ruleLegal
-      ? {
-          document_id: documentId,
-          case_number: extracted.legal?.case_number?.value ?? null,
-          court_name: extracted.legal?.authority?.value ?? null,
-          claimant_name: extracted.legal?.claimant_name?.value ?? null,
-          claimant_email: extracted.legal?.claimant_email?.value ?? null,
-          respondent_name: extracted.legal?.respondent_name?.value ?? null,
-          respondent_email: extracted.legal?.respondent_email?.value ?? null,
-          respondent_contact:
-            extracted.legal?.respondent_contact_name?.value ?? null,
-          employment_start_date:
-            extracted.legal?.employment_start_date?.value ?? null,
-          employment_end_date:
-            extracted.legal?.employment_end_date?.value ?? null,
-          basic_salary: parseNumericForDb(
-            extracted.legal?.basic_salary_monthly?.value,
-          ),
-          occupation: extracted.legal?.occupation?.value ?? null,
-        }
-      : { document_id: documentId };
-
-    const ruleInvoice =
-      Boolean(extracted.invoice) &&
-      extracted.invoicePresent &&
-      extracted.invoiceConfidence > 0;
-
-    const invoiceRow: Record<string, unknown> = ruleInvoice
-      ? {
-          document_id: documentId,
-          bill_number: extracted.invoice?.invoice_number?.value ?? null,
-          bill_date: extracted.invoice?.invoice_date?.value ?? null,
-          due_date: extracted.invoice?.due_date?.value ?? null,
-          currency: extracted.invoice?.currency?.value ?? "SGD",
-          gst_amount: parseNumericForDb(extracted.invoice?.tax_amount?.value),
-          total_amount_due: parseNumericForDb(
-            extracted.invoice?.total_amount?.value,
-          ),
-          account_name:
-            extracted.invoice?.vendor_name?.value ??
-            extracted.invoice?.buyer_name?.value ??
-            null,
-          service_type: extracted.invoice?.buyer_name?.value ?? null,
-        }
-      : { document_id: documentId, currency: "SGD" };
-
-    const llmOverride =
-      process.env.ENTITY_EXTRACTION_LLM_OVERRIDE === "true";
+    const llmOverride = process.env.ENTITY_EXTRACTION_LLM_OVERRIDE === "true";
     let entityLlmApplied = false;
     let entityLlmFieldsFilled = 0;
     let entityLlmUsableKeysBeforeMerge: number | undefined;
@@ -1077,22 +1063,37 @@ export async function processIntakeDocument(
             },
           });
         }
+        // Keep only keys that exist in public.document_entities to avoid
+        // schema-cache/upsert failures when LLM returns extra fields.
+        const llmUniversalForEntities: Record<string, unknown> = {
+          recipient_name: llmBuckets.universal?.recipient_name,
+          organization_name: llmBuckets.universal?.organization_name,
+          contact_person_name: llmBuckets.universal?.contact_person_name,
+          recipient_uen: llmBuckets.universal?.recipient_uen,
+          recipient_address: llmBuckets.universal?.recipient_address,
+          sender_name: llmBuckets.universal?.sender_name,
+          document_date: llmBuckets.universal?.document_date,
+          reference_number: llmBuckets.universal?.reference_number,
+          document_type: llmBuckets.universal?.document_type,
+          subject_line: llmBuckets.universal?.subject_line,
+          action_required: llmBuckets.universal?.action_required,
+          deadline_date: llmBuckets.universal?.deadline_date,
+          priority: llmBuckets.universal?.priority,
+          match_confidence: llmBuckets.universal?.match_confidence,
+          status: llmBuckets.universal?.status,
+        };
+        const llmForEntities: Record<string, unknown> = {
+          ...llmUniversalForEntities,
+          claimant_name: llmBuckets.legal?.claimant_name,
+          claimant_email: llmBuckets.legal?.claimant_email,
+          respondent_name: llmBuckets.legal?.respondent_name,
+          respondent_email: llmBuckets.legal?.respondent_email,
+          account_name: llmBuckets.invoice?.account_name,
+        };
         entityLlmFieldsFilled += mergeEntityRows(
-          universalRow,
-          llmBuckets.universal as Record<string, unknown>,
+          entitiesRow,
+          llmForEntities,
           UNIVERSAL_PROTECTED_KEYS,
-          llmOverride,
-        );
-        entityLlmFieldsFilled += mergeEntityRows(
-          legalRow,
-          llmBuckets.legal as Record<string, unknown>,
-          new Set(["document_id"]),
-          llmOverride,
-        );
-        entityLlmFieldsFilled += mergeEntityRows(
-          invoiceRow,
-          llmBuckets.invoice as Record<string, unknown>,
-          new Set(["document_id"]),
           llmOverride,
         );
       }
@@ -1108,74 +1109,50 @@ export async function processIntakeDocument(
       });
     }
 
-    entitySummary = buildEntitySummaryFromDbRows(
-      universalRow,
-      legalRow,
-      invoiceRow,
-    );
+    entitySummary = buildEntitySummaryFromDbRows(entitiesRow);
+    // #region agent log
+    fetch("http://127.0.0.1:7413/ingest/554872b6-b526-4f4b-85dd-aaf0b37e62cd", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Debug-Session-Id": "392735",
+      },
+      body: JSON.stringify({
+        sessionId: "392735",
+        runId: "pre-fix",
+        hypothesisId: "H5_supabase_payload_missing_fields",
+        location: "intake-process.ts:1062",
+        message: "=== SAVING TO SUPABASE ===",
+        data: {
+          documentId,
+          drid,
+          fieldCount: Object.keys(entitiesRow).length,
+          nonNullFieldCount: Object.values(entitiesRow).filter(
+            (v) => v !== null && v !== "",
+          ).length,
+          keys: Object.keys(entitiesRow),
+        },
+        timestamp: Date.now(),
+      }),
+    }).catch(() => {});
+    // #endregion
 
-    const universalUpsert = await db
-      .from("universal_info")
-      .upsert(universalRow, { onConflict: "document_id" });
+    const entitiesUpsert = await db
+      .from("document_entities")
+      .upsert(entitiesRow, { onConflict: "document_id" });
 
-    if (universalUpsert.error) {
+    if (entitiesUpsert.error) {
       await db.from("audit_logs").insert({
         entity_type: "document",
         entity_id: documentId,
         action: "ENTITY_EXTRACTION_FAILED",
         actor: "AIMA",
         metadata: {
-          detail: universalUpsert.error.message,
-          step: "universal_info",
+          detail: entitiesUpsert.error.message,
+          step: "document_entities",
         },
       });
-    }
-
-    const shouldUpsertLegal =
-      ruleLegal ||
-      rowHasExtractableFields(legalRow, ["document_id"]);
-
-    if (shouldUpsertLegal) {
-      const legalUpsert = await db
-        .from("legal_entities")
-        .upsert(legalRow, { onConflict: "document_id" });
-      if (legalUpsert.error) {
-        await db.from("audit_logs").insert({
-          entity_type: "document",
-          entity_id: documentId,
-          action: "ENTITY_EXTRACTION_FAILED",
-          actor: "AIMA",
-          metadata: {
-            detail: legalUpsert.error.message,
-            step: "legal_entities",
-          },
-        });
-      }
-    }
-
-    const shouldUpsertInvoice =
-      ruleInvoice ||
-      rowHasExtractableFields(invoiceRow, ["document_id", "currency"]);
-
-    if (shouldUpsertInvoice) {
-      const invoiceUpsert = await db
-        .from("invoice_entities")
-        .upsert(invoiceRow, { onConflict: "document_id" });
-      if (invoiceUpsert.error) {
-        await db.from("audit_logs").insert({
-          entity_type: "document",
-          entity_id: documentId,
-          action: "ENTITY_EXTRACTION_FAILED",
-          actor: "AIMA",
-          metadata: {
-            detail: invoiceUpsert.error.message,
-            step: "invoice_entities",
-          },
-        });
-      }
-    }
-
-    if (!universalUpsert.error) {
+    } else {
       await db.from("audit_logs").insert({
         entity_type: "document",
         entity_id: documentId,
@@ -1193,7 +1170,33 @@ export async function processIntakeDocument(
         },
       });
     }
-  } catch {
+
+    const odooSummary = await processClientMatching(db, documentId, {
+      drid,
+      mrid,
+      reviewRequired,
+      ocrText: ocr.text,
+      fallbackEntitiesRow: entitiesRow,
+    });
+    if (odooSummary != null) odooMatchSummary = odooSummary;
+  } catch (entityError) {
+    const detail =
+      entityError instanceof Error ? entityError.message : "unknown_error";
+    console.error("=== ENTITY EXTRACTION FAILED ===", {
+      documentId,
+      drid,
+      detail,
+    });
+    await db.from("audit_logs").insert({
+      entity_type: "document",
+      entity_id: documentId,
+      action: "ENTITY_EXTRACTION_PIPELINE_ERROR",
+      actor: "AIMA",
+      metadata: {
+        step: "entity_extraction_pipeline",
+        detail,
+      },
+    });
     // Non-fatal: keep intake success even if entity extraction fails.
   }
 
@@ -1227,6 +1230,7 @@ export async function processIntakeDocument(
       },
       entitySummary,
       split: splitToResponseBody(split),
+      ...(odooMatchSummary != null ? { odooMatch: odooMatchSummary } : {}),
     },
   };
 }

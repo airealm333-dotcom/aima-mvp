@@ -128,6 +128,14 @@ export async function runManualIntakeWithOptionalPdfSplit(
 
     for (const chunk of chunks) {
       const chunkName = `${input.fileName.replace(/\.pdf$/i, "")}.part-${chunk.index}.pdf`;
+      console.log("=== SPLIT CHUNK INTAKE START ===", {
+        sourceFile: input.fileName,
+        chunkIndex: chunk.index,
+        chunkTotal: chunk.total,
+        pageStart: chunk.pageStart,
+        pageEnd: chunk.pageEnd,
+        splitMethod,
+      });
       const intake = await processIntakeDocument({
         ...base,
         buffer: chunk.buffer,
@@ -146,6 +154,13 @@ export async function runManualIntakeWithOptionalPdfSplit(
           pageStart: chunk.pageStart,
           pageEnd: chunk.pageEnd,
         },
+      });
+      console.log("=== SPLIT CHUNK INTAKE RESULT ===", {
+        sourceFile: input.fileName,
+        chunkIndex: chunk.index,
+        ok: intake.ok,
+        status: intake.status,
+        documentId: intake.ok ? intake.body.documentId : null,
       });
 
       if (!intake.ok) {

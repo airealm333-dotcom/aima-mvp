@@ -6,11 +6,14 @@ export type EntityField = {
 export type UniversalMinimalEntities = {
   sender?: EntityField;
   addressee?: EntityField;
+  recipient_uen?: EntityField;
+  recipient_address?: EntityField;
   /** Client company / legal entity (letterhead, PTE LTD line, etc.). */
   organization_name?: EntityField;
   /** Named individual when Attn/Attention/Dear line matches. */
   contact_person_name?: EntityField;
   reference_number?: EntityField;
+  subject_line?: EntityField;
   document_date?: EntityField;
   document_type?: EntityField;
 };
@@ -267,6 +270,56 @@ function extractReference(
   return undefined;
 }
 
+function extractRecipientUen(text: string): EntityField | undefined {
+  const m =
+    text.match(/\bUEN\b\s*[:\-]?\s*([0-9]{8}[A-Z]|[0-9]{9}[A-Z])\b/i) ??
+    text.match(/\b([0-9]{8}[A-Z]|[0-9]{9}[A-Z])\b/);
+  if (!m?.[1]) return undefined;
+  return { value: m[1].trim().toUpperCase(), confidence: 86 };
+}
+
+function extractRecipientAddress(rawLines: string[], upperLines: string[]): EntityField | undefined {
+  // Prefer explicit TO block.
+  const toIdx = upperLines.findIndex((l) => /^\s*TO\s*[:\-]?\s*$/.test(l));
+  if (toIdx >= 0) {
+    const chunk: string[] = [];
+    for (let i = toIdx + 1; i < Math.min(rawLines.length, toIdx + 8); i += 1) {
+      const line = (rawLines[i] ?? "").trim();
+      if (!line) break;
+      if (/^(DATE|ATTN|ATTENTION|DEAR|RE[:\s]|SUBJECT[:\s])/i.test(line)) break;
+      chunk.push(line);
+    }
+    if (chunk.length >= 2) {
+      return { value: chunk.join(", "), confidence: 80 };
+    }
+  }
+
+  // Generic fallback: line with postal code + previous lines.
+  const sgZipIdx = upperLines.findIndex((l) => /\bSINGAPORE\s+\d{6}\b/.test(l));
+  if (sgZipIdx >= 0) {
+    const start = Math.max(0, sgZipIdx - 2);
+    const lines = rawLines.slice(start, sgZipIdx + 1).map((l) => l.trim()).filter(Boolean);
+    if (lines.length >= 2) return { value: lines.join(", "), confidence: 70 };
+  }
+  return undefined;
+}
+
+function extractSubjectLine(rawLines: string[]): EntityField | undefined {
+  for (const line of rawLines.slice(0, 45)) {
+    const reMatch = line.match(/^\s*RE\s*[:\-]\s*(.+)$/i);
+    if (reMatch?.[1]) {
+      const value = normalizeCapturedFieldValue(reMatch[1]);
+      if (value.length >= 4) return { value, confidence: 84 };
+    }
+    const subMatch = line.match(/^\s*(?:SUBJECT|TITLE)\s*[:\-]\s*(.+)$/i);
+    if (subMatch?.[1]) {
+      const value = normalizeCapturedFieldValue(subMatch[1]);
+      if (value.length >= 4) return { value, confidence: 82 };
+    }
+  }
+  return undefined;
+}
+
 function extractCaseNumber(text: string): EntityField | undefined {
   const ect = text.match(/\bECT\/\d{4,}\/\d{2,6}\b/i);
   if (ect?.[0]) return { value: ect[0], confidence: 95 };
@@ -368,9 +421,9 @@ function extractAmountNearLabel(
   return { value: num, confidence: 80 };
 }
 
-function extractVendorBuyer(text: string, lines: string[]) {
+function extractVendorBuyer(text: string, rawLines: string[], lines: string[]) {
   const sender = pickFirstLineValue(
-    lines,
+    rawLines,
     [
       /\b(?:FROM|SENDER|VENDOR|SUPPLIER|ISSUED BY)\b\s*[:-]\s*(.{4,})\s*$/i,
       /\b(?:SENDER)\b\s*[:-]\s*(.{4,})\s*$/i,
@@ -378,13 +431,28 @@ function extractVendorBuyer(text: string, lines: string[]) {
     75,
   );
 
-  const addressee = pickFirstLineValue(
-    lines,
-    [
-      /\b(?:TO|ADDRESSEE|BILL TO|CUSTOMER|RECIPIENT|ATTN)\b\s*[:-]\s*(.{4,})\s*$/i,
-    ],
+  let addressee = pickFirstLineValue(
+    rawLines,
+    [/\b(?:TO|ADDRESSEE|BILL TO|CUSTOMER|RECIPIENT)\b\s*[:-]\s*(.{4,})\s*$/i],
     75,
   );
+
+  // Support 2-line TO blocks:
+  //   To:
+  //   SoCash ACQ SPV Pte. Ltd.
+  if (!addressee) {
+    const toIdx = lines.findIndex((l) => /^\s*TO\s*[:\-]?\s*$/i.test(l));
+    if (toIdx >= 0) {
+      for (let i = toIdx + 1; i < Math.min(rawLines.length, toIdx + 6); i += 1) {
+        const candidate = normalizeCapturedFieldValue(rawLines[i] ?? "");
+        if (!candidate || candidate.length < 4) continue;
+        if (/^\d+/.test(candidate)) continue;
+        if (/^(ATTN|ATTENTION|DEAR)\b/i.test(candidate)) continue;
+        addressee = { value: candidate, confidence: 82 };
+        break;
+      }
+    }
+  }
 
   // Sometimes the labels are within one line without a dedicated token.
   if (!sender && text) {
@@ -405,12 +473,13 @@ function extractVendorBuyer(text: string, lines: string[]) {
 function extractContactPersonFromAttn(rawLines: string[]): EntityField | undefined {
   for (const line of rawLines.slice(0, 45)) {
     const attn = line.match(
-      /^\s*(?:ATTN|ATTENTION|ATT\.?\s*N)\s*[:\-.]\s*(.+)$/i,
+      /^\s*(?:ATTN|ATTENTION|ATT\.?\s*N)\s*[:\-.]?\s*(.+)$/i,
     );
     if (attn?.[1]) {
-      const v = attn[1].trim();
-      if (v.length >= 2 && v.length < 160) {
-        return { value: v.replace(/\s+/g, " "), confidence: 78 };
+      const withoutParen = attn[1].replace(/\([^)]*\)/g, " ").trim();
+      const v = withoutParen.split(/[;,]/)[0]?.trim() ?? "";
+      if (v.length >= 2 && v.length < 160 && !/@/.test(v)) {
+        return { value: v.replace(/\s+/g, " "), confidence: 82 };
       }
     }
     const dear = line.match(
@@ -421,6 +490,22 @@ function extractContactPersonFromAttn(rawLines: string[]): EntityField | undefin
       if (v.length >= 2 && v.length < 120) {
         return { value: v.replace(/\s+/g, " "), confidence: 62 };
       }
+    }
+  }
+  return undefined;
+}
+
+function extractOrganizationFromAttention(rawLines: string[]): EntityField | undefined {
+  for (const line of rawLines.slice(0, 45)) {
+    const attn = line.match(/^\s*(?:ATTN|ATTENTION|ATT\.?\s*N)\s*[:\-.]?\s*(.+)$/i);
+    if (!attn?.[1]) continue;
+    const parenCompany = attn[1].match(/\(([^)]+)\)/);
+    const candidate = normalizeCapturedFieldValue(parenCompany?.[1] ?? "");
+    if (
+      candidate.length >= 6 &&
+      /\b(PTE\.?\s*LTD|LTD\.?|LIMITED|LLP|LLC|INC\.?|CORP\.?)\b/i.test(candidate)
+    ) {
+      return { value: candidate, confidence: 84 };
     }
   }
   return undefined;
@@ -670,16 +755,32 @@ export function extractDocumentEntitiesFromOcrText(
 
   const universalReference = extractReference(normalizedText, lines);
   if (universalReference) universal.reference_number = universalReference;
+  const recipientUen = extractRecipientUen(normalizedText);
+  if (recipientUen) universal.recipient_uen = recipientUen;
+  const recipientAddress = extractRecipientAddress(rawLines, lines);
+  if (recipientAddress) universal.recipient_address = recipientAddress;
+  const subjectLine = extractSubjectLine(rawLines);
+  if (subjectLine) universal.subject_line = subjectLine;
 
   // Sender/addressee are often in the "FROM"/"TO" lines.
-  const { sender, buyer } = extractVendorBuyer(normalizedText, lines);
+  const { sender, buyer } = extractVendorBuyer(normalizedText, rawLines, lines);
   if (sender) universal.sender = sender;
   if (buyer) universal.addressee = buyer;
 
   const contactPerson = extractContactPersonFromAttn(rawLines);
   if (contactPerson) universal.contact_person_name = contactPerson;
+  const orgFromAttention = extractOrganizationFromAttention(rawLines);
   const orgFromLine = extractOrganizationFromLines(rawLines);
-  if (orgFromLine) universal.organization_name = orgFromLine;
+  if (orgFromAttention) {
+    if (
+      !universal.addressee ||
+      orgFromAttention.value.toUpperCase() !== universal.addressee.value.toUpperCase()
+    ) {
+      universal.organization_name = orgFromAttention;
+    }
+  } else if (orgFromLine) {
+    universal.organization_name = orgFromLine;
+  }
 
   // Document date: often "DATE" or first date in doc.
   const documentDate = findDateNearKeyword(
@@ -699,7 +800,7 @@ export function extractDocumentEntitiesFromOcrText(
   );
   const taxAmount = extractAmountNearLabel(normalizedText, /(?:GST|TAX|VAT)/);
 
-  const vendorBuyer = extractVendorBuyer(normalizedText, lines);
+  const vendorBuyer = extractVendorBuyer(normalizedText, rawLines, lines);
 
   const invoiceEntities: InvoiceCoreEntities = {
     invoice_number: invoiceNumber,
@@ -824,9 +925,12 @@ export function extractDocumentEntitiesFromOcrText(
   const universalConfidence = averageConfidence([
     universal.sender,
     universal.addressee,
+    universal.recipient_uen,
+    universal.recipient_address,
     universal.organization_name,
     universal.contact_person_name,
     universal.reference_number,
+    universal.subject_line,
     universal.document_date,
     universal.document_type,
   ]);

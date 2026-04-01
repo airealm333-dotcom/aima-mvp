@@ -166,14 +166,29 @@ function detectBarcodeStartPages(pageTexts: string[]): number[] {
   const barcodePages: number[] = [];
 
   for (let i = 0; i < pageTexts.length; i += 1) {
-    const page = pageTexts[i]?.replace(/\s+/g, " ").trim() ?? "";
+    const page = pageTexts[i] ?? "";
+    const normalized = page.replace(/\s+/g, " ").trim();
+    const topWindow = normalized.slice(0, 700);
     if (!page) continue;
 
-    // Strongest signal: explicit "barcode" + long numeric token.
-    const hasBarcodeLabel = /\bbarcode\b/i.test(page);
-    const hasLongDigits = /\b\d{6,}\b/.test(page);
+    // Prefer explicit barcode labels first.
+    const hasBarcodeLabel = /\b(barcode|tracking)\b/i.test(topWindow);
+    const hasLongDigits = /\b\d{6,}\b/.test(topWindow);
+    const hasAlphaNumericId =
+      /\b[A-Z]{2,}\d{4,}[A-Z0-9-]*\b/i.test(topWindow) ||
+      /\b\d{6,}[A-Z]{1,3}\b/i.test(topWindow);
+    const hasPageReset = /\bpage\s*1\s*of\b/i.test(topWindow);
+    const hasReferenceCue = /\b(ref(?:erence)?|claim|case|acct|account)\b/i.test(
+      topWindow,
+    );
 
-    if (hasBarcodeLabel && hasLongDigits) {
+    const strongBoundaryByLabel = hasBarcodeLabel && (hasLongDigits || hasAlphaNumericId);
+    const likelyBoundaryByTopId =
+      !hasBarcodeLabel &&
+      (hasLongDigits || hasAlphaNumericId) &&
+      (hasPageReset || hasReferenceCue);
+
+    if (strongBoundaryByLabel || likelyBoundaryByTopId) {
       barcodePages.push(i + 1); // 1-indexed pages
     }
   }
@@ -209,51 +224,19 @@ export async function splitPdfIntoLogicalSections(
   const source = await PDFDocument.load(buffer);
   const actualPdfPages = source.getPageCount();
   const debugEnabled = process.env.PDF_SPLIT_DEBUG === "true";
-
-  // Primary path: render PDF pages and use Claude Vision page-level boundary detection.
-  const visionSplit = await splitPdfWithClaudeVision({
-    buffer,
-    totalPages: actualPdfPages > 0 ? actualPdfPages : 1,
-    debugEnabled,
-  });
-  if (visionSplit.sections && visionSplit.sections.length > 1) {
-    const chunks = await buildChunksFromSections(source, visionSplit.sections);
-    const avgConfidence =
-      chunks.length > 0
-        ? Math.round(
-            chunks.reduce((sum, chunk) => sum + chunk.confidence, 0) /
-              chunks.length,
-          )
-        : 0;
-    if (debugEnabled) {
-      console.info("[pdf-split] split_method", "anthropic_vision");
-      console.info("[pdf-split] vision_sections", visionSplit.sections);
-    }
-    return {
-      chunks,
-      method: "anthropic",
-      confidence: avgConfidence,
-      suspectedMultiInvoice: false,
-      reason: visionSplit.reason,
-      model: visionSplit.model,
-    };
-  }
-  if (debugEnabled) {
-    console.info(
-      "[pdf-split] vision_split_fallback_reason",
-      visionSplit.reason,
-    );
-  }
+  const totalPages = actualPdfPages > 0 ? actualPdfPages : 1;
 
   let imageBarcodeStartPages: number[] = [];
   let imageBarcodeReason = "barcode_scan_not_run";
   try {
     const scanned = await scanPdfBarcodeStartPages(buffer);
-    imageBarcodeStartPages = scanned.startPages;
+    imageBarcodeStartPages = Array.from(new Set(scanned.startPages)).sort(
+      (a, b) => a - b,
+    );
     imageBarcodeReason = scanned.reason;
     if (debugEnabled) {
       console.info("[pdf-split] image_barcode_scan_result", {
-        startPages: scanned.startPages,
+        startPages: imageBarcodeStartPages,
         reason: scanned.reason,
         evidence: scanned.evidence,
       });
@@ -268,7 +251,7 @@ export async function splitPdfIntoLogicalSections(
   if (imageBarcodeStartPages.length >= 2) {
     const barcodeSections = buildSectionsFromStartPages(
       imageBarcodeStartPages,
-      actualPdfPages > 0 ? actualPdfPages : 1,
+      totalPages,
     );
     if (barcodeSections.length >= 2) {
       const chunks: PdfChunk[] = [];
@@ -292,6 +275,7 @@ export async function splitPdfIntoLogicalSections(
       }
 
       if (debugEnabled) {
+        console.info("[pdf-split] boundary_source", "barcode");
         console.info("[pdf-split] split_method", "barcode_rules");
         console.info("[pdf-split] barcode_sections", barcodeSections);
       }
@@ -314,9 +298,46 @@ export async function splitPdfIntoLogicalSections(
     }
   }
 
+  // Primary AI path only when barcode boundaries are unavailable.
+  const visionSplit = await splitPdfWithClaudeVision({
+    buffer,
+    totalPages,
+    debugEnabled,
+  });
+
+  if (visionSplit.sections && visionSplit.sections.length > 1) {
+    const chunks = await buildChunksFromSections(source, visionSplit.sections);
+    const avgConfidence =
+      chunks.length > 0
+        ? Math.round(
+            chunks.reduce((sum, chunk) => sum + chunk.confidence, 0) /
+              chunks.length,
+          )
+        : 0;
+    if (debugEnabled) {
+      console.info("[pdf-split] boundary_source", "vision");
+      console.info("[pdf-split] split_method", "anthropic_vision");
+      console.info("[pdf-split] vision_sections", visionSplit.sections);
+    }
+    return {
+      chunks,
+      method: "anthropic",
+      confidence: avgConfidence,
+      suspectedMultiInvoice: false,
+      reason: visionSplit.reason,
+      model: visionSplit.model,
+    };
+  }
+  if (debugEnabled) {
+    console.info(
+      "[pdf-split] vision_split_fallback_reason",
+      visionSplit.reason,
+    );
+  }
+
   const extracted = await extractPdfText(buffer, "application/pdf");
   const rawText = extracted.text ?? "";
-  const totalPages = actualPdfPages > 0 ? actualPdfPages : 1;
+  
 
   // Avoid splitting on partial OCR coverage (e.g. Vision only returned first 5 pages
   // for a 20-page PDF). Running AI split on truncated text creates incorrect chunks.
@@ -355,6 +376,9 @@ export async function splitPdfIntoLogicalSections(
 
   const pageTexts = splitPageText(rawText, totalPages);
   const barcodeStartPages = detectBarcodeStartPages(pageTexts);
+  if (debugEnabled) {
+    console.info("[pdf-split] ocr_barcode_start_pages", barcodeStartPages);
+  }
 
   // Primary deterministic splitter: barcode start pages define packet boundaries.
   if (barcodeStartPages.length >= 2) {
@@ -383,7 +407,8 @@ export async function splitPdfIntoLogicalSections(
         });
       }
 
-      if (process.env.PDF_SPLIT_DEBUG === "true") {
+      if (debugEnabled) {
+        console.info("[pdf-split] boundary_source", "barcode_ocr");
         console.info("[pdf-split] barcode_start_pages", barcodeStartPages);
         console.info("[pdf-split] barcode_sections", barcodeSections);
       }
@@ -498,6 +523,14 @@ Example:
   Pages 2-9: no new barcode → still Document 1
   Page 10: barcode 20349486 → Document 1 ENDS, Document 2 STARTS
   Pages 11-18: no new barcode → still Document 2
+
+COVERAGE REQUIREMENT (CRITICAL):
+- Every page from 1 to ${totalPages} MUST appear in exactly one document.
+- If you find a barcode on page 1 but NO second barcode anywhere, then document 1 spans pages [1, ${totalPages}].
+- NEVER return pages [1, 1] just because the barcode appears only on page 1.
+- The barcode is the START of a multi-page document packet, not a standalone 1-page document.
+- Set pages[1] (the end page) to the last page that belongs to the same packet — which is either (next boundary - 1) or ${totalPages} for the last document.
+- If your response does not account for all ${totalPages} pages, it is WRONG.
 
 Return ONLY a valid JSON array, no explanation, no markdown:
 [
@@ -659,10 +692,12 @@ Do not merge distinct packets.`;
     console.info("[pdf-split] normalized_sections", normalized);
   }
 
+  const autoFilledRest = (normalized[1]?.reason ?? "").includes("Auto-filled");
   const suspiciousOnePlusRest =
     isOnePlusRestSplit(normalized, totalPages) &&
     (!hasStrongBoundaryEvidence(normalized[0]?.reason ?? "") ||
-      normalized[0].confidence < 75);
+      normalized[0].confidence < 75 ||
+      autoFilledRest);
   if (suspiciousOnePlusRest) {
     return {
       chunks: [],
