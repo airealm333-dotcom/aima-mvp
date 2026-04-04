@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { runEmailIntakePoll } from "@/lib/gmail-intake";
+import { runEmailIntakePoll } from "@/lib/gmail-queue";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 
 export const runtime = "nodejs";

@@ -1,0 +1,125 @@
+AIMA vs SOP-CSP-013 (REGISTERED OFFICE MAIL HANDLING) — FUNCTIONAL GAP CHECK
+================================================================================
+Scope: What the SOP describes as system behavior vs what this AIMA repo implements.
+Excludes: ISO, security, KPIs, retention, evidence-pack wording, non-functional compliance.
+
+--------------------------------------------------------------------------------
+IMPLEMENTED (OR LARGELY ALIGNED)
+--------------------------------------------------------------------------------
+
+Intake from a designated mailbox "folder"
+  Gmail label queue (Unprocessed -> poll -> Processed). Folder = Gmail label + filter (outside app).
+
+Poll for new mail
+  POST /api/cron/intake-email -> runEmailIntakePoll. Frequency = whatever the scheduler uses (not fixed to 5 minutes in code).
+
+Attachment -> immutable copy + hash
+  Supabase Storage upload; sha256_hash; duplicate detection vs prior upload.
+
+Gmail message id + optional MRID/DRID from subject
+  gmail_message_id on documents; parseMridDridFromSubject when subject encodes MRID/DRID.
+
+OCR
+  extractPdfText (Google Vision / fallback).
+
+Low OCR -> flag unreadable
+  E4_DOCUMENT_UNREADABLE when OCR fails or very low text coverage; can drive D3 review rules.
+
+Document type classification
+  Rules (IRAS, ACRA, MOM, bank/financial, legal, utility/property, general) + optional LLM if CLASSIFICATION_USE_LLM=true and threshold (src/lib/document-classify.ts). Labels are close to SOP categories (naming differs: BANK_FINANCIAL, UTILITY_PROPERTY, GENERAL).
+
+Entity-style fields from OCR
+  Rule-based extraction + optional LLM merge into document_entities (names, UEN, emails, etc.).
+
+Client match in Odoo
+  UEN -> exact normalized name -> fuzzy name on res.partner; configurable fields; score bands (~>=92 match, 85-91 ambiguous, <85 no match) — src/lib/odoo-client-match.ts, odoo-match-helpers.ts.
+
+Address-based Odoo match
+  NOT implemented (SOP mentions address only cautiously).
+
+Contact / email resolution from Odoo
+  Child contacts under matched partner: x_ro_mail_recipient preferred, then any child email, then company email — resolveOdooRecipientContact in odoo-client-match.ts.
+
+Persist match + contact outcome
+  documents: Odoo match fields; document_entities: odoo_partner_id, odoo_contact_email, statuses D3_MATCHED, D4_CONTACT_RESOLVED.
+
+Exceptions queue (functional)
+  exceptions table for E4 and Odoo outcomes (E1_CLIENT_NOT_MATCHED, E2_EMAIL_NOT_FOUND, E2_CLIENT_AMBIGUOUS, E3_ODOO_CLIENT_MATCH_ERROR-style). GET /api/exceptions/open; UI lists open exceptions.
+
+Human review of classification (NOT the same as SOP "D3 client matched")
+  documents.status D3_REVIEW_PENDING / D3_APPROVED etc. = classification + split-risk review. POST /api/review/document/[id]: approve, correct label, needs rescan. Review queue API filters pending items.
+
+PDF may contain multiple logical documents
+  splitPdfIntoLogicalSections (Gmail + manual PDF); multiple processIntakeDocument runs / multiple DRIDs when split fires.
+
+Manual intake channel
+  Web form -> POST /api/intake with optional MRID/DRID overrides, sender/addressee/MIE name/envelope condition -> mail_items. Note: email intake path does not populate sender/addressee from MIME headers today.
+
+--------------------------------------------------------------------------------
+PARTIALLY IMPLEMENTED / DIFFERENT FROM SOP
+--------------------------------------------------------------------------------
+
+State machine D0-D7
+  Overlap but not same names. documents: D0_CREATED, D1_OCR_COMPLETED, then status jumps to D3_REVIEW_PENDING or D3_APPROVED for the CLASSIFICATION gate — not "D2 classified" as a long-lived document status. document_entities uses D2_CLASSIFIED, D3_MATCHED, D4_CONTACT_RESOLVED for entity/Odoo track. No D5 / D6 dispatch states in code.
+
+SOP "D3 = client matched"
+  Client match is Odoo pipeline + entity status, NOT the documents.status D3_* labels (those are human classification review).
+
+Exception codes E1/E2/E3
+  Similar intent; type strings differ (e.g. E2_CLIENT_AMBIGUOUS vs SOP E3 MULTIPLE_MATCH naming).
+
+Mandatory human gates (e.g. 85-91 + IRAS/ACRA/MOM/legal)
+  Generic rules: confidence, UNKNOWN, duplicate, OCR issue, split flags — not the SOP's exact conditional matrix.
+
+Step 11 "processing record"
+  Largely covered by mail_items + documents + audit_logs; not one dedicated "processing record" table as prose describes.
+
+Consolidation window
+  dispatch_date exists on entity row but no job batches multiple documents into one outbound email.
+
+Steps 17-18 dispatch (client-facing email)
+  No SMTP/send flow; no composition of "Registered Office Mail Received" email. dispatch_date stays null on intake path shown.
+
+Archival path \RegisteredOffice\Processed\{ClientID}\...
+  Not this layout; storage is Supabase paths (e.g. year/month/MRID/DRID).
+
+Reference-number / bank / case mapping in Odoo as match tier
+  Not implemented; only UEN + names + fuzzy on partner fields.
+
+--------------------------------------------------------------------------------
+NOT IMPLEMENTED (FUNCTIONALLY) IF SOP ASSUMES THE APP DOES IT
+--------------------------------------------------------------------------------
+
+Physical workflow MI0-MI4, mail register, MRID on envelope, MIE tray — outside AIMA.
+
+Automatic "move to Unprocessed" — Gmail filter/rule, not app code.
+
+Consolidated dispatch email (one email per client per window).
+
+Actual email dispatch to client and D6 DISPATCHED (and bounce handling).
+
+Client-specific filesystem archival as in SOP.
+
+Odoo address match and rich contextual refs as match inputs.
+
+Strict SOP exception numbering / SLA timers as automated workflow (exceptions exist; SLA engine not apparent in repo).
+
+--------------------------------------------------------------------------------
+ONE-LINE SUMMARY
+--------------------------------------------------------------------------------
+
+Done: ingest (Gmail label + cron), store + hash, OCR, classify (rules + optional LLM), extract entities, Odoo partner match + contact email resolution, exceptions + classification review UI/API, optional PDF split, manual upload with mail metadata.
+
+Not done: outbound client email, consolidation, D5/D6-style dispatch lifecycle, SOP-identical state naming, address/context matching, physical mail register / archival paths as specified.
+
+--------------------------------------------------------------------------------
+KEY CODE REFERENCES (for maintainers)
+--------------------------------------------------------------------------------
+
+Gmail poll: src/lib/gmail-intake.ts, src/app/api/cron/intake-email/route.ts
+Intake pipeline: src/lib/intake-process.ts
+Classification: src/lib/document-classify.ts
+Odoo match + D4 contact: src/lib/odoo-client-match.ts, src/lib/intake-odoo-match.ts, src/lib/process-d3-d4.ts
+Review API: src/app/api/review/document/[id]/route.ts, src/app/api/review/queue/route.ts
+Exceptions API: src/app/api/exceptions/open/route.ts
+Manual upload: src/app/api/intake/route.ts, src/lib/manual-pdf-split-intake.ts

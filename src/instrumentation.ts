@@ -19,7 +19,7 @@ export async function register() {
     busy = true;
     try {
       const { getSupabaseAdmin } = await import("@/lib/supabase-admin");
-      const { runEmailIntakePoll } = await import("@/lib/gmail-intake");
+      const { runEmailIntakePoll } = await import("@/lib/gmail-queue");
       const supabase = getSupabaseAdmin();
       if (!supabase) {
         return;

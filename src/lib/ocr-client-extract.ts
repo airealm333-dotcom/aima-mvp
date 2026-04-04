@@ -1,23 +1,46 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { PDFDocument } from "pdf-lib";
 
+export const CLASSIFICATION_LABELS = [
+  "IRAS",
+  "ACRA",
+  "MOM",
+  "BANK_FINANCIAL",
+  "LEGAL",
+  "UTILITY_PROPERTY",
+  "GENERAL",
+  "UNKNOWN",
+] as const;
+
+export type ClassificationLabel = (typeof CLASSIFICATION_LABELS)[number];
+
 /** Same contract as `scripts/extract-ocr-clients.ts` / Claude system prompt. */
 export const OCR_CLIENT_EXTRACT_SYSTEM_PROMPT = `You are a document analysis assistant. Extract all distinct clients/entities from the provided document text.
 Return ONLY a valid JSON array with no additional text, explanation, or markdown formatting.
 Each object must follow this exact structure:
-{"name": "", "UEN": "", "document_type": "", "page_range": ""}
+{"name": "", "UEN": "", "document_type": "", "page_range": "", "classification": ""}
 
 Rules:
 - If UEN is not found, use "Null"
 - page_range should be in format "1-5" or "18" for single pages
 - document_type should be concise but descriptive
-- Include one entry per distinct document per entity`;
+- Include one entry per distinct document per entity
+- classification must be exactly one of: IRAS, ACRA, MOM, BANK_FINANCIAL, LEGAL, UTILITY_PROPERTY, GENERAL, UNKNOWN
+  - IRAS: tax notices, income tax assessments, GST filings, IRAS correspondence
+  - ACRA: business registration, incorporation, annual returns, ACRA notices
+  - MOM: work passes, employment passes, MOM letters, CPF notices
+  - BANK_FINANCIAL: bank statements, loan documents, financial statements, investment reports
+  - LEGAL: contracts, agreements, court documents, legal notices
+  - UTILITY_PROPERTY: utility bills, property tax, tenancy agreements, SP services
+  - GENERAL: general business correspondence, invoices, receipts not covered above
+  - UNKNOWN: cannot determine the document type`;
 
 export type OcrClientExtractRow = {
   name: string;
   UEN: string;
   document_type: string;
   page_range: string;
+  classification: ClassificationLabel;
 };
 
 function stripJsonFences(raw: string): string {
@@ -51,7 +74,13 @@ export function normalizeOcrClientExtractRows(
     const document_type =
       r.document_type != null ? String(r.document_type).trim() : "";
     const page_range = r.page_range != null ? String(r.page_range).trim() : "";
-    out.push({ name, UEN, document_type, page_range });
+    const rawClassification =
+      r.classification != null ? String(r.classification).trim().toUpperCase() : "";
+    const classification: ClassificationLabel =
+      (CLASSIFICATION_LABELS as readonly string[]).includes(rawClassification)
+        ? (rawClassification as ClassificationLabel)
+        : "UNKNOWN";
+    out.push({ name, UEN, document_type, page_range, classification });
   }
   return out;
 }

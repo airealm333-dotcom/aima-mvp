@@ -1,10 +1,5 @@
 import { NextResponse } from "next/server";
-import { extractPdfText } from "@/lib/ocr";
-import {
-  extractOcrClientRowsFromDocumentText,
-  parsePageRangeString,
-  slicePdfBufferByOneBasedPageRange,
-} from "@/lib/ocr-client-extract";
+import { runOcrClientsPipelineOnPdfBuffer } from "@/lib/ocr-clients-pipeline";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -30,62 +25,20 @@ export async function POST(request: Request) {
     }
 
     const buffer = Buffer.from(await file.arrayBuffer());
+    const { ocr, items } = await runOcrClientsPipelineOnPdfBuffer(buffer);
 
-    const ocr = await extractPdfText(buffer, "application/pdf", {
-      labelPdfPages: true,
-    });
-
-    const rows = await extractOcrClientRowsFromDocumentText(ocr.text);
-
-    const items = await Promise.all(
-      rows.map(async (row, index) => {
-        const pr = parsePageRangeString(row.page_range, ocr.pageCount);
-        if (!pr) {
-          return {
-            index,
-            name: row.name,
-            UEN: row.UEN,
-            document_type: row.document_type,
-            page_range: row.page_range,
-            pageStart: null as number | null,
-            pageEnd: null as number | null,
-            pdfBase64: null as string | null,
-            pdfError: `Could not parse page_range "${row.page_range}" for a ${ocr.pageCount}-page PDF.`,
-          };
-        }
-        try {
-          const pdfBuf = await slicePdfBufferByOneBasedPageRange(
-            buffer,
-            pr.start,
-            pr.end,
-          );
-          return {
-            index,
-            name: row.name,
-            UEN: row.UEN,
-            document_type: row.document_type,
-            page_range: row.page_range,
-            pageStart: pr.start,
-            pageEnd: pr.end,
-            pdfBase64: pdfBuf.toString("base64"),
-            pdfError: null as string | null,
-          };
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
-          return {
-            index,
-            name: row.name,
-            UEN: row.UEN,
-            document_type: row.document_type,
-            page_range: row.page_range,
-            pageStart: pr.start,
-            pageEnd: pr.end,
-            pdfBase64: null as string | null,
-            pdfError: msg,
-          };
-        }
-      }),
-    );
+    const payloadItems = items.map((it) => ({
+      index: it.index,
+      name: it.name,
+      UEN: it.UEN,
+      document_type: it.document_type,
+      classification: it.classification,
+      page_range: it.page_range,
+      pageStart: it.pageStart,
+      pageEnd: it.pageEnd,
+      pdfBase64: it.pdfBuffer ? it.pdfBuffer.toString("base64") : null,
+      pdfError: it.pdfError,
+    }));
 
     return NextResponse.json({
       fileName: file.name,
@@ -95,7 +48,7 @@ export async function POST(request: Request) {
         provider: ocr.provider,
         pageAlignment: ocr.pageAlignment ?? null,
       },
-      items,
+      items: payloadItems,
     });
   } catch (error) {
     const detail =

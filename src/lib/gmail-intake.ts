@@ -16,7 +16,10 @@ type GmailMessagePart = {
   parts?: GmailMessagePart[] | null;
 };
 
-type GmailClient = NonNullable<ReturnType<typeof getGmailClientOrNull>>;
+export type GmailIntakeClient = NonNullable<
+  ReturnType<typeof getGmailClientOrNull>
+>;
+type GmailClient = GmailIntakeClient;
 
 const ALLOWED_MIME = new Set([
   "application/pdf",
@@ -137,7 +140,7 @@ async function resolveLabelId(
 }
 
 /** Create user label if missing (SOP Unprocessed/Processed setup without manual Gmail UI). */
-async function getOrCreateLabelId(
+export async function getOrCreateLabelId(
   gmail: GmailClient,
   userId: string,
   labelName: string,
@@ -175,297 +178,267 @@ async function insertAuditLog(
   return supabase.client.from("audit_logs" as never).insert(row as never);
 }
 
+export type SingleGmailIntakeResult = {
+  processed: number;
+  skipped: number;
+  errors: string[];
+  details: Array<{ messageId: string; outcome: string; item?: string }>;
+  /** True when all attachments succeeded and Gmail Unprocessed label was removed. */
+  movedGmailLabel: boolean;
+};
+
 /**
- * Poll Gmail for messages in the Unprocessed label, ingest first PDF/image attachment, move to Processed.
+ * Ingest every supported attachment for one Gmail message (split PDFs, intake, optional label move).
  */
-export async function runEmailIntakePoll(
+export async function processSingleGmailMessage(
   supabase: SupabaseAdminBundle,
-): Promise<EmailPollResult> {
-  const result: EmailPollResult = {
-    scanned: 0,
+  gmail: GmailIntakeClient,
+  userId: string,
+  unprocessedId: string,
+  processedId: string | null,
+  messageId: string,
+): Promise<SingleGmailIntakeResult> {
+  const result: SingleGmailIntakeResult = {
     processed: 0,
     skipped: 0,
     errors: [],
     details: [],
+    movedGmailLabel: false,
   };
 
-  const gmail = getGmailClientOrNull();
-  if (!gmail) {
-    result.errors.push("GMAIL_NOT_CONFIGURED");
-    return result;
-  }
+  try {
+    const full = await gmail.users.messages.get({
+      userId,
+      id: messageId,
+      format: "full",
+    });
 
-  const userId = process.env.GMAIL_INTAKE_USER_ID?.trim() || "me";
-  const unprocessedName =
-    process.env.GMAIL_INTAKE_LABEL_UNPROCESSED?.trim() || "Unprocessed";
-  const processedName =
-    process.env.GMAIL_INTAKE_LABEL_PROCESSED?.trim() || "Processed";
+    const payload = full.data.payload;
+    const subject = getSubject(payload) ?? "";
+    const { mrid: subjectMrid, drid: subjectDrid } =
+      parseMridDridFromSubject(subject);
 
-  const unprocessedId = await getOrCreateLabelId(
-    gmail,
-    userId,
-    unprocessedName,
-  );
-  const processedId = await getOrCreateLabelId(gmail, userId, processedName);
+    const flat: GmailMessagePart[] = [];
+    flattenParts(payload, flat);
+    const parts = pickAttachmentParts(flat);
+    if (parts.length === 0) {
+      result.skipped += 1;
+      result.details.push({ messageId, outcome: "no_supported_attachment" });
+      return result;
+    }
 
-  if (!unprocessedId) {
-    result.errors.push(`LABEL_MISSING_OR_CREATE_FAILED:${unprocessedName}`);
-    return result;
-  }
+    let hadAttachmentErrors = false;
 
-  const maxRaw = process.env.GMAIL_POLL_MAX_MESSAGES;
-  const maxMessages = maxRaw ? Number.parseInt(maxRaw, 10) : 10;
-  const limit =
-    Number.isFinite(maxMessages) && maxMessages > 0 ? maxMessages : 10;
-
-  const list = await gmail.users.messages.list({
-    userId,
-    labelIds: [unprocessedId],
-    maxResults: limit,
-  });
-
-  const messageRefs = list.data.messages ?? [];
-  result.scanned = messageRefs.length;
-
-  for (const ref of messageRefs) {
-    const messageId = ref.id;
-    if (!messageId) continue;
-
-    try {
-      const full = await gmail.users.messages.get({
+    for (let i = 0; i < parts.length; i += 1) {
+      const part = parts[i];
+      const downloaded = await downloadPartBody(
+        gmail,
         userId,
-        id: messageId,
-        format: "full",
-      });
-
-      const payload = full.data.payload;
-      const subject = getSubject(payload) ?? "";
-      const { mrid: subjectMrid, drid: subjectDrid } =
-        parseMridDridFromSubject(subject);
-
-      const flat: GmailMessagePart[] = [];
-      flattenParts(payload, flat);
-      const parts = pickAttachmentParts(flat);
-      if (parts.length === 0) {
+        messageId,
+        part,
+      );
+      const itemLabel = part.filename ?? `attachment_${i + 1}`;
+      if (!downloaded) {
+        hadAttachmentErrors = true;
         result.skipped += 1;
-        result.details.push({ messageId, outcome: "no_supported_attachment" });
+        result.details.push({
+          messageId,
+          outcome: "attachment_decode_failed",
+          item: itemLabel,
+        });
         continue;
       }
 
-      let hadAttachmentErrors = false;
+      const splitParentRef = `${messageId}:${itemLabel}`;
+      let splitCandidate: Awaited<
+        ReturnType<typeof splitPdfIntoLogicalSections>
+      > | null = null;
+      if (downloaded.mime === "application/pdf") {
+        try {
+          splitCandidate = await splitPdfIntoLogicalSections(
+            downloaded.buffer,
+          );
+        } catch {
+          splitCandidate = {
+            chunks: [],
+            method: "single",
+            confidence: 0,
+            suspectedMultiInvoice: false,
+            reason: "split_unexpected_error",
+          };
+        }
+      }
+      const chunks =
+        splitCandidate && splitCandidate.chunks.length > 1
+          ? splitCandidate.chunks
+          : null;
 
-      for (let i = 0; i < parts.length; i += 1) {
-        const part = parts[i];
-        const downloaded = await downloadPartBody(
-          gmail,
-          userId,
-          messageId,
-          part,
-        );
-        const itemLabel = part.filename ?? `attachment_${i + 1}`;
-        if (!downloaded) {
-          hadAttachmentErrors = true;
-          result.skipped += 1;
-          result.details.push({
+      if (chunks && chunks.length > 1) {
+        const splitMethod = splitCandidate?.method ?? "anthropic";
+        await insertAuditLog(supabase, {
+          entity_type: "mail_item",
+          entity_id: messageId,
+          action: "AI_SPLIT_DETECTED",
+          actor: "AIMA",
+          metadata: {
             messageId,
-            outcome: "attachment_decode_failed",
-            item: itemLabel,
-          });
-          continue;
-        }
+            sourceFile: downloaded.filename,
+            segmentCount: chunks.length,
+            method: splitMethod,
+            confidence: splitCandidate?.confidence ?? 0,
+            model: splitCandidate?.model ?? null,
+          },
+        });
 
-        const splitParentRef = `${messageId}:${itemLabel}`;
-        let splitCandidate: Awaited<
-          ReturnType<typeof splitPdfIntoLogicalSections>
-        > | null = null;
-        if (downloaded.mime === "application/pdf") {
-          try {
-            splitCandidate = await splitPdfIntoLogicalSections(
-              downloaded.buffer,
-            );
-          } catch {
-            splitCandidate = {
-              chunks: [],
-              method: "single",
-              confidence: 0,
-              suspectedMultiInvoice: false,
-              reason: "split_unexpected_error",
-            };
-          }
-        }
-        const chunks =
-          splitCandidate && splitCandidate.chunks.length > 1
-            ? splitCandidate.chunks
-            : null;
-
-        if (chunks && chunks.length > 1) {
-          const splitMethod = splitCandidate?.method ?? "anthropic";
-          await insertAuditLog(supabase, {
-            entity_type: "mail_item",
-            entity_id: messageId,
-            action: "AI_SPLIT_DETECTED",
-            actor: "AIMA",
-            metadata: {
-              messageId,
-              sourceFile: downloaded.filename,
-              segmentCount: chunks.length,
+        for (const chunk of chunks) {
+          const chunkName = `${downloaded.filename.replace(/\.pdf$/i, "")}.part-${chunk.index}.pdf`;
+          const intake = await processIntakeDocument({
+            supabase,
+            buffer: chunk.buffer,
+            contentType: "application/pdf",
+            fileName: chunkName,
+            source: "email_intake",
+            gmailMessageId: messageId,
+            subjectMrid,
+            subjectDrid,
+            envelopeCondition: "sealed",
+            split: {
+              parentRef: splitParentRef,
+              index: chunk.index,
+              total: chunk.total,
               method: splitMethod,
-              confidence: splitCandidate?.confidence ?? 0,
+              confidence: chunk.confidence,
+              suspectedMultiInvoice: splitCandidate?.suspectedMultiInvoice,
+              sectionType: chunk.sectionType,
+              reason: chunk.reason,
               model: splitCandidate?.model ?? null,
             },
           });
 
-          for (const chunk of chunks) {
-            const chunkName = `${downloaded.filename.replace(/\.pdf$/i, "")}.part-${chunk.index}.pdf`;
-            const intake = await processIntakeDocument({
-              supabase,
-              buffer: chunk.buffer,
-              contentType: "application/pdf",
-              fileName: chunkName,
-              source: "email_intake",
-              gmailMessageId: messageId,
-              subjectMrid,
-              subjectDrid,
-              envelopeCondition: "sealed",
-              split: {
-                parentRef: splitParentRef,
-                index: chunk.index,
-                total: chunk.total,
-                method: splitMethod,
-                confidence: chunk.confidence,
-                suspectedMultiInvoice: splitCandidate?.suspectedMultiInvoice,
-                sectionType: chunk.sectionType,
-                reason: chunk.reason,
-                model: splitCandidate?.model ?? null,
-              },
-            });
-
-            if (!intake.ok) {
-              hadAttachmentErrors = true;
-              result.errors.push(
-                `${messageId}:${chunkName}:${JSON.stringify(intake.body)}`,
-              );
-              result.details.push({
-                messageId,
-                item: chunkName,
-                outcome: `intake_failed_${intake.status}`,
-              });
-              continue;
-            }
-
-            await insertAuditLog(supabase, {
-              entity_type: "document",
-              entity_id: intake.body.documentId,
-              action: "AI_SPLIT_SEGMENT_INGESTED",
-              actor: "AIMA",
-              metadata: {
-                messageId,
-                sourceFile: downloaded.filename,
-                chunkIndex: chunk.index,
-                chunkTotal: chunk.total,
-                pageStart: chunk.pageStart,
-                pageEnd: chunk.pageEnd,
-                method: splitMethod,
-                sectionType: chunk.sectionType,
-                confidence: chunk.confidence,
-                reason: chunk.reason,
-                model: splitCandidate?.model ?? null,
-              },
-            });
-
-            result.processed += 1;
+          if (!intake.ok) {
+            hadAttachmentErrors = true;
+            result.errors.push(
+              `${messageId}:${chunkName}:${JSON.stringify(intake.body)}`,
+            );
             result.details.push({
               messageId,
               item: chunkName,
-              outcome: "ok_ai_split_chunk",
+              outcome: `intake_failed_${intake.status}`,
             });
+            continue;
           }
-          continue;
-        }
 
-        const intake = await processIntakeDocument({
-          supabase,
-          buffer: downloaded.buffer,
-          contentType: downloaded.mime,
-          fileName: downloaded.filename,
-          source: "email_intake",
-          gmailMessageId: messageId,
-          subjectMrid,
-          subjectDrid,
-          envelopeCondition: "sealed",
-          split: splitCandidate
-            ? {
-                parentRef: splitParentRef,
-                index: 1,
-                total: 1,
-                method: splitCandidate.method,
-                confidence: splitCandidate.confidence,
-                suspectedMultiInvoice: splitCandidate.suspectedMultiInvoice,
-                reason: splitCandidate.reason,
-                sectionType: "other",
-                model: splitCandidate.model ?? null,
-              }
-            : undefined,
-        });
-
-        if (!intake.ok) {
-          hadAttachmentErrors = true;
-          result.errors.push(`${messageId}:${JSON.stringify(intake.body)}`);
-          result.details.push({
-            messageId,
-            item: itemLabel,
-            outcome: `intake_failed_${intake.status}`,
-          });
-          continue;
-        }
-
-        if (splitCandidate?.suspectedMultiInvoice) {
           await insertAuditLog(supabase, {
             entity_type: "document",
             entity_id: intake.body.documentId,
-            action: "AI_SPLIT_FALLBACK_SINGLE",
+            action: "AI_SPLIT_SEGMENT_INGESTED",
             actor: "AIMA",
             metadata: {
               messageId,
               sourceFile: downloaded.filename,
-              reason: splitCandidate.reason ?? "fallback_single",
-              confidence: splitCandidate.confidence,
-              model: splitCandidate.model ?? null,
+              chunkIndex: chunk.index,
+              chunkTotal: chunk.total,
+              pageStart: chunk.pageStart,
+              pageEnd: chunk.pageEnd,
+              method: splitMethod,
+              sectionType: chunk.sectionType,
+              confidence: chunk.confidence,
+              reason: chunk.reason,
+              model: splitCandidate?.model ?? null,
             },
           });
-        }
-        if (
-          splitCandidate?.method === "single" &&
-          splitCandidate?.reason?.startsWith("split_parse_failed:")
-        ) {
+
+          result.processed += 1;
           result.details.push({
             messageId,
-            item: itemLabel,
-            outcome: "split_parse_failed_fallback_single",
+            item: chunkName,
+            outcome: "ok_ai_split_chunk",
           });
         }
-
-        result.processed += 1;
-        const wasDuplicate =
-          intake.ok &&
-          typeof intake.body === "object" &&
-          intake.body !== null &&
-          "flags" in intake.body &&
-          typeof (intake.body as { flags?: { isDuplicate?: boolean } }).flags
-            ?.isDuplicate === "boolean" &&
-          (intake.body as { flags?: { isDuplicate?: boolean } }).flags
-            ?.isDuplicate === true;
-        result.details.push({
-          messageId,
-          item: itemLabel,
-          outcome: wasDuplicate ? "ok_duplicate" : "ok",
-        });
-      }
-
-      if (hadAttachmentErrors) {
         continue;
       }
 
+      const intake = await processIntakeDocument({
+        supabase,
+        buffer: downloaded.buffer,
+        contentType: downloaded.mime,
+        fileName: downloaded.filename,
+        source: "email_intake",
+        gmailMessageId: messageId,
+        subjectMrid,
+        subjectDrid,
+        envelopeCondition: "sealed",
+        split: splitCandidate
+          ? {
+              parentRef: splitParentRef,
+              index: 1,
+              total: 1,
+              method: splitCandidate.method,
+              confidence: splitCandidate.confidence,
+              suspectedMultiInvoice: splitCandidate.suspectedMultiInvoice,
+              reason: splitCandidate.reason,
+              sectionType: "other",
+              model: splitCandidate.model ?? null,
+            }
+          : undefined,
+      });
+
+      if (!intake.ok) {
+        hadAttachmentErrors = true;
+        result.errors.push(`${messageId}:${JSON.stringify(intake.body)}`);
+        result.details.push({
+          messageId,
+          item: itemLabel,
+          outcome: `intake_failed_${intake.status}`,
+        });
+        continue;
+      }
+
+      if (splitCandidate?.suspectedMultiInvoice) {
+        await insertAuditLog(supabase, {
+          entity_type: "document",
+          entity_id: intake.body.documentId,
+          action: "AI_SPLIT_FALLBACK_SINGLE",
+          actor: "AIMA",
+          metadata: {
+            messageId,
+            sourceFile: downloaded.filename,
+            reason: splitCandidate.reason ?? "fallback_single",
+            confidence: splitCandidate.confidence,
+            model: splitCandidate.model ?? null,
+          },
+        });
+      }
+      if (
+        splitCandidate?.method === "single" &&
+        splitCandidate?.reason?.startsWith("split_parse_failed:")
+      ) {
+        result.details.push({
+          messageId,
+          item: itemLabel,
+          outcome: "split_parse_failed_fallback_single",
+        });
+      }
+
+      result.processed += 1;
+      const wasDuplicate =
+        intake.ok &&
+        typeof intake.body === "object" &&
+        intake.body !== null &&
+        "flags" in intake.body &&
+        typeof (intake.body as { flags?: { isDuplicate?: boolean } }).flags
+          ?.isDuplicate === "boolean" &&
+        (intake.body as { flags?: { isDuplicate?: boolean } }).flags
+          ?.isDuplicate === true;
+      result.details.push({
+        messageId,
+        item: itemLabel,
+        outcome: wasDuplicate ? "ok_duplicate" : "ok",
+      });
+    }
+
+    if (!hadAttachmentErrors) {
+      result.movedGmailLabel = true;
       if (processedId) {
         await gmail.users.messages.modify({
           userId,
@@ -484,12 +457,31 @@ export async function runEmailIntakePoll(
           },
         });
       }
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      result.errors.push(`${messageId}:${msg}`);
-      result.details.push({ messageId, outcome: "exception" });
     }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    result.errors.push(`${messageId}:${msg}`);
+    result.details.push({ messageId, outcome: "exception" });
   }
 
   return result;
+}
+
+/** Download the highest-priority supported attachment (same ordering as intake). */
+export async function downloadFirstSupportedAttachment(
+  gmail: GmailIntakeClient,
+  userId: string,
+  messageId: string,
+): Promise<{ buffer: Buffer; mime: string; filename: string } | null> {
+  const full = await gmail.users.messages.get({
+    userId,
+    id: messageId,
+    format: "full",
+  });
+  const payload = full.data.payload;
+  const flat: GmailMessagePart[] = [];
+  flattenParts(payload, flat);
+  const parts = pickAttachmentParts(flat);
+  if (parts.length === 0) return null;
+  return downloadPartBody(gmail, userId, messageId, parts[0]);
 }
