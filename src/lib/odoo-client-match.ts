@@ -48,10 +48,12 @@ export type OdooResolvedContact = {
   contactId: number | null;
   email: string;
   resolutionMethod:
-    | "child_ro_flag"
-    | "child_any_email"
+    | "primary_contact"
+    | "secondary_contact"
     | "company_email"
     | "not_found";
+  accountingManagerEmail: string | null;
+  accountingManagerName: string | null;
 };
 
 function safeFieldName(raw: string, fallback: string): string {
@@ -440,19 +442,33 @@ function isTruthy(v: unknown): boolean {
   return false;
 }
 
+function extractPlainEmail(raw: string): string | null {
+  // RFC 2822 "Display Name" <email> or <email>
+  const angleMatch = raw.match(/<([^>]+)>/);
+  if (angleMatch) raw = angleMatch[1];
+  const t = raw.trim();
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(t) ? t : null;
+}
+
 function normalizeEmail(v: unknown): string | null {
   if (typeof v !== "string") return null;
   const t = v.trim();
   if (!t) return null;
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(t)) return null;
-  return t;
+  // Handle multiple addresses separated by ; or ,
+  const first = t.split(/[;,]/)[0];
+  return extractPlainEmail(first ?? t);
 }
 
 /**
- * D4 contact resolution:
- * 1) child contacts with x_ro_mail_recipient=true and valid email
- * 2) any child contact with valid email
- * 3) parent company email
+ * Contact resolution priority:
+ * 1) Primary contact — child partner with x_ro_mail_recipient=true
+ * 2) Secondary contact — any other child partner with a valid email
+ * 3) Company email fallback — email field on the company record itself
+ * 4) not_found
+ *
+ * Contacts are fetched two ways and merged (deduped by id):
+ *   a) Via company's child_ids field (reads what Odoo itself considers children)
+ *   b) Via parent_id search (catches contacts not listed in child_ids)
  */
 export async function resolveOdooRecipientContact(input: {
   client: OdooJsonRpcClient;
@@ -461,93 +477,165 @@ export async function resolveOdooRecipientContact(input: {
   partnerId: number;
 }): Promise<OdooResolvedContact> {
   const roFlagField = "x_ro_mail_recipient";
-  const childDomain: Array<[string, string, unknown]> = [
-    ["parent_id", "=", input.partnerId],
-    ["active", "=", true],
-  ];
-  const childFields = [
-    "id",
-    "name",
-    "email",
-    roFlagField,
-    "active",
-    "parent_id",
-  ];
-  console.log("[D4] Searching for RO contact with:", {
-    partnerId: input.partnerId,
-    roFlagField,
-    query: childDomain,
-    fields: childFields,
-  });
+  const contactFields = ["id", "name", "email", roFlagField, "active", "parent_id"];
 
-  const childRows = await input.client.searchReadPartners(
-    input.uid,
-    childDomain,
-    childFields,
-    200,
-  );
-  console.log("[D4] Child contact rows (debug):", {
-    count: childRows.length,
-    sample: childRows.slice(0, 5).map((r) => ({
-      id: r.id,
-      name: r.name,
-      email: r.email,
-      parent_id: r.parent_id,
-      x_ro_mail_recipient: r.x_ro_mail_recipient,
-      x_studio_ro_mail_recipient: r.x_studio_ro_mail_recipient,
-    })),
-  });
-
-  const withEmail = childRows
-    .map((r) => ({
-      id: typeof r.id === "number" ? r.id : Number(r.id),
-      email: normalizeEmail(r.email),
-      roFlag: isTruthy(r[roFlagField]),
-    }))
-    .filter((r) => Number.isFinite(r.id) && r.email != null) as Array<{
-    id: number;
-    email: string;
-    roFlag: boolean;
-  }>;
-
-  const preferred = withEmail.find((r) => r.roFlag);
-  if (preferred) {
-    return {
-      contactId: preferred.id,
-      email: preferred.email,
-      resolutionMethod: "child_ro_flag",
-    };
-  }
-
-  const anyChild = withEmail[0];
-  if (anyChild) {
-    return {
-      contactId: anyChild.id,
-      email: anyChild.email,
-      resolutionMethod: "child_any_email",
-    };
-  }
-
+  // Fetch parent company: email + child_ids + user_id (for accounting manager)
   const parentRows = await input.client.searchReadPartners(
     input.uid,
     [["id", "=", input.partnerId]],
-    ["id", "email"],
+    ["id", "email", "user_id", "child_ids"],
     1,
   );
   const parent = parentRows[0];
-  const parentEmail = normalizeEmail(parent?.email);
-  if (parent && parentEmail) {
-    const id = typeof parent.id === "number" ? parent.id : Number(parent.id);
+
+  const { accountingManagerEmail, accountingManagerName } =
+    await resolveAccountingManager(input.client, input.uid, parent);
+
+  // --- Gather child contacts via two paths ---
+  const seenIds = new Set<number>();
+  const allChildRows: Record<string, unknown>[] = [];
+
+  const mergeRows = (rows: Record<string, unknown>[]) => {
+    for (const r of rows) {
+      const id = typeof r.id === "number" ? r.id : Number(r.id);
+      if (Number.isFinite(id) && !seenIds.has(id)) {
+        seenIds.add(id);
+        allChildRows.push(r);
+      }
+    }
+  };
+
+  // Path A: use child_ids from parent record
+  const childIds = Array.isArray(parent?.child_ids)
+    ? (parent.child_ids as unknown[]).filter((v) => typeof v === "number")
+    : [];
+  if (childIds.length > 0) {
+    const rows = await input.client.searchReadPartners(
+      input.uid,
+      [["id", "in", childIds]],
+      contactFields,
+      200,
+    );
+    mergeRows(rows);
+  }
+
+  // Path B: parent_id search (catches contacts not listed in child_ids)
+  const byParent = await input.client.searchReadPartners(
+    input.uid,
+    [["parent_id", "=", input.partnerId]],
+    contactFields,
+    200,
+  );
+  mergeRows(byParent);
+
+  console.log(`[D4] partnerId=${input.partnerId} contacts found: ${allChildRows.length} (child_ids=${childIds.length}, parent_id_search=${byParent.length})`);
+
+  // --- Apply priority ---
+  const withEmail = allChildRows
+    .map((r) => ({
+      id: typeof r.id === "number" ? r.id : Number(r.id),
+      name: typeof r.name === "string" ? r.name : null,
+      email: normalizeEmail(r.email),
+      isPrimary: isTruthy(r[roFlagField]),
+    }))
+    .filter((r) => Number.isFinite(r.id) && r.email != null) as Array<{
+    id: number;
+    name: string | null;
+    email: string;
+    isPrimary: boolean;
+  }>;
+
+  // 1) Primary contact (x_ro_mail_recipient = true)
+  const primary = withEmail.find((r) => r.isPrimary);
+  if (primary) {
+    console.log(`[D4] partnerId=${input.partnerId} → primary_contact "${primary.name}" <${primary.email}>`);
     return {
-      contactId: Number.isFinite(id) ? id : null,
-      email: parentEmail,
-      resolutionMethod: "company_email",
+      contactId: primary.id,
+      email: primary.email,
+      resolutionMethod: "primary_contact",
+      accountingManagerEmail,
+      accountingManagerName,
     };
   }
 
+  // 2) Secondary contact (any child with valid email)
+  const secondary = withEmail[0];
+  if (secondary) {
+    console.log(`[D4] partnerId=${input.partnerId} → secondary_contact "${secondary.name}" <${secondary.email}>`);
+    return {
+      contactId: secondary.id,
+      email: secondary.email,
+      resolutionMethod: "secondary_contact",
+      accountingManagerEmail,
+      accountingManagerName,
+    };
+  }
+
+  // 3) Company email fallback
+  const companyEmail = normalizeEmail(parent?.email);
+  if (parent && companyEmail) {
+    const id = typeof parent.id === "number" ? parent.id : Number(parent.id);
+    console.log(`[D4] partnerId=${input.partnerId} → company_email <${companyEmail}>`);
+    return {
+      contactId: Number.isFinite(id) ? id : null,
+      email: companyEmail,
+      resolutionMethod: "company_email",
+      accountingManagerEmail,
+      accountingManagerName,
+    };
+  }
+
+  console.log(`[D4] partnerId=${input.partnerId} → not_found`);
   return {
     contactId: null,
     email: "",
     resolutionMethod: "not_found",
+    accountingManagerEmail,
+    accountingManagerName,
   };
+}
+
+/**
+ * Resolves the accounting manager (user_id on the partner's Sales & Purchase tab).
+ * user_id is a Many2One — Odoo returns [id, "Name"] or false.
+ * We read res.users to get their login (email) and name.
+ */
+async function resolveAccountingManager(
+  client: OdooJsonRpcClient,
+  uid: number,
+  partner: Record<string, unknown> | undefined,
+): Promise<{ accountingManagerEmail: string | null; accountingManagerName: string | null }> {
+  if (!partner) return { accountingManagerEmail: null, accountingManagerName: null };
+
+  const userId = partner.user_id;
+  // Many2One comes back as [id, "Name"] or false
+  const rawId = Array.isArray(userId) ? userId[0] : null;
+  const rawName = Array.isArray(userId) && userId.length > 1 ? String(userId[1]) : null;
+  const userIdNum = typeof rawId === "number" ? rawId : typeof rawId === "string" ? Number(rawId) : null;
+
+  if (!userIdNum || !Number.isFinite(userIdNum)) {
+    return { accountingManagerEmail: null, accountingManagerName: null };
+  }
+
+  try {
+    const userRows = await client.searchRead(
+      uid,
+      "res.users",
+      [["id", "=", userIdNum]],
+      ["id", "login", "name"],
+      1,
+    );
+    const user = userRows[0];
+    if (!user) return { accountingManagerEmail: null, accountingManagerName: rawName };
+
+    const email = normalizeEmail(user.login) ?? normalizeEmail(user.email);
+    const name = typeof user.name === "string" ? user.name.trim() : rawName;
+    console.log(`[D4] Accounting manager: ${name ?? "?"} <${email ?? "no email"}> (user_id=${userIdNum})`);
+    return {
+      accountingManagerEmail: email ?? null,
+      accountingManagerName: name ?? null,
+    };
+  } catch {
+    return { accountingManagerEmail: null, accountingManagerName: rawName };
+  }
 }

@@ -25,7 +25,8 @@ export async function POST(request: Request) {
     }
 
     const buffer = Buffer.from(await file.arrayBuffer());
-    const { ocr, items } = await runOcrClientsPipelineOnPdfBuffer(buffer);
+    const { ocr, overall_confidence, items } =
+      await runOcrClientsPipelineOnPdfBuffer(buffer);
 
     const payloadItems = items.map((it) => ({
       index: it.index,
@@ -33,11 +34,20 @@ export async function POST(request: Request) {
       UEN: it.UEN,
       document_type: it.document_type,
       classification: it.classification,
+      confidence: it.confidence,
       page_range: it.page_range,
       pageStart: it.pageStart,
       pageEnd: it.pageEnd,
       pdfBase64: it.pdfBuffer ? it.pdfBuffer.toString("base64") : null,
       pdfError: it.pdfError,
+      odoo_match_status: it.odoo_match_status,
+      odoo_partner_id: it.odoo_partner_id,
+      odoo_match_score: it.odoo_match_score,
+      odoo_match_method: it.odoo_match_method,
+      odoo_contact_email: it.odoo_contact_email,
+      odoo_resolution_method: it.odoo_resolution_method,
+      odoo_accounting_manager_email: it.odoo_accounting_manager_email,
+      odoo_accounting_manager_name: it.odoo_accounting_manager_name,
     }));
 
     return NextResponse.json({
@@ -48,6 +58,7 @@ export async function POST(request: Request) {
         provider: ocr.provider,
         pageAlignment: ocr.pageAlignment ?? null,
       },
+      overall_confidence,
       items: payloadItems,
     });
   } catch (error) {

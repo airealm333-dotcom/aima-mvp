@@ -1,7 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+
+// ─── Types ────────────────────────────────────────────────────────────────────
 
 type MailItemEmbed = {
   mrid?: string | null;
@@ -15,11 +17,28 @@ type OcrSplitItem = {
   name: string;
   UEN: string;
   document_type: string;
+  classification: string;
+  confidence: number;
   page_range: string;
   pageStart: number | null;
   pageEnd: number | null;
   split_path: string | null;
   pdfError: string | null;
+  odoo_match_status: string | null;
+  odoo_partner_id: number | null;
+  odoo_match_score: number | null;
+  odoo_match_method: string | null;
+  odoo_contact_email: string | null;
+  odoo_resolution_method: string | null;
+  odoo_accounting_manager_email: string | null;
+  odoo_accounting_manager_name: string | null;
+};
+
+type OcrSummary = {
+  pageCount?: number;
+  textLength?: number;
+  provider?: string;
+  overall_confidence?: number;
 };
 
 type DashboardDoc = {
@@ -33,7 +52,7 @@ type DashboardDoc = {
   classification_confidence?: number | null;
   ocr_clients_status?: string | null;
   ocr_clients_items?: OcrSplitItem[] | null;
-  ocr_clients_ocr_summary?: Record<string, unknown> | null;
+  ocr_clients_ocr_summary?: OcrSummary | null;
   ocr_clients_completed_at?: string | null;
   ocr_clients_error?: string | null;
   split_index?: number | null;
@@ -55,18 +74,44 @@ type GmailQueueRow = {
   status: string;
   error_message: string | null;
   processing_started_at: string | null;
+  ingested_at?: string | null;
   created_at: string;
 };
 
 type OverviewResponse = {
   gmailUnprocessed: GmailQueueRow[];
   gmailInProgress: GmailQueueRow[];
+  gmailProcessed: GmailQueueRow[];
   gmailQueueHint?: string;
   processing: DashboardDoc[];
   processed: DashboardDoc[];
 };
 
-type Tab = "unprocessed" | "in_progress" | "processed";
+// Flat item enriched with its parent doc context
+type FlatClientItem = {
+  docId: string;
+  drid: string;
+  classificationLabel: string | null;
+  overallConfidence: number | null;
+  item: OcrSplitItem;
+  reviewReasons: string[];
+};
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+const CONFIDENCE_THRESHOLD = 70;
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function relativeTime(val: number | string | null | undefined): string {
+  const ts = typeof val === "string" ? new Date(val).getTime() : val;
+  if (!ts || !Number.isFinite(ts)) return "—";
+  const diff = Date.now() - ts;
+  if (diff < 60_000) return "just now";
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
+  return `${Math.floor(diff / 86_400_000)}d ago`;
+}
 
 function mailItem(doc: DashboardDoc): MailItemEmbed {
   const mi = doc.mail_items;
@@ -75,496 +120,648 @@ function mailItem(doc: DashboardDoc): MailItemEmbed {
   return null;
 }
 
-function formatQueueDate(ms: number | null): string {
-  if (ms == null || !Number.isFinite(ms)) return "—";
-  try {
-    return new Date(ms).toISOString().replace("T", " ").slice(0, 19);
-  } catch {
-    return "—";
-  }
+function reviewReasons(item: OcrSplitItem): string[] {
+  const r: string[] = [];
+  if (item.confidence != null && item.confidence < CONFIDENCE_THRESHOLD)
+    r.push(`Low confidence (${item.confidence}%)`);
+  if (item.odoo_match_status === "no_match") r.push("No Odoo match");
+  if (item.odoo_match_status === "ambiguous") r.push("Ambiguous match");
+  if (item.odoo_match_status === "matched" && !item.odoo_contact_email)
+    r.push("No contact email");
+  if (item.UEN === "Null" && item.odoo_match_status !== "matched")
+    r.push("UEN missing");
+  if (item.pdfError) r.push("PDF slice error");
+  return r;
 }
 
-function GmailQueueCard({ row }: { row: GmailQueueRow }) {
-  const mid = row.gmail_message_id;
-  const downloadHref = `/api/dashboard/gmail-queue/${encodeURIComponent(mid)}/download`;
-  const mridShow =
-    row.subject_mrid ??
-    "— (not in subject; assigned when intake runs)";
-  const dridShow =
-    row.subject_drid ??
-    "— (not in subject; assigned when intake runs)";
+function flattenClientItems(docs: DashboardDoc[]): FlatClientItem[] {
+  const result: FlatClientItem[] = [];
+  for (const doc of docs) {
+    const items = Array.isArray(doc.ocr_clients_items)
+      ? doc.ocr_clients_items
+      : [];
+    for (const item of items) {
+      result.push({
+        docId: doc.id,
+        drid: doc.drid,
+        classificationLabel: doc.classification_label ?? null,
+        overallConfidence:
+          doc.ocr_clients_ocr_summary?.overall_confidence ?? null,
+        item,
+        reviewReasons: reviewReasons(item),
+      });
+    }
+  }
+  return result;
+}
 
+// ─── Primitives ───────────────────────────────────────────────────────────────
+
+function Badge({
+  label,
+  color = "zinc",
+}: {
+  label: string;
+  color?: "zinc" | "green" | "yellow" | "red" | "blue" | "amber";
+}) {
+  const cls: Record<string, string> = {
+    zinc: "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400",
+    green: "bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300",
+    yellow: "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/40 dark:text-yellow-300",
+    red: "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300",
+    blue: "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300",
+    amber: "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300",
+  };
   return (
-    <article className="rounded-lg border border-zinc-200 p-4 dark:border-zinc-800">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0 space-y-1 text-sm">
-          <div className="text-xs text-zinc-500">
-            Gmail ID{" "}
-            <code className="rounded bg-zinc-100 px-1 text-[11px] dark:bg-zinc-900">
-              {mid}
-            </code>
-            <span className="ml-2 rounded bg-zinc-200 px-1.5 py-0.5 text-[10px] uppercase dark:bg-zinc-700">
-              {row.status}
-            </span>
-          </div>
-          {row.subject ? (
-            <div>
-              <span className="text-zinc-500">Subject</span> {row.subject}
-            </div>
-          ) : null}
-          <div>
-            <span className="text-zinc-500">MRID (from subject)</span>{" "}
-            <code className="rounded bg-zinc-100 px-1 dark:bg-zinc-900">
-              {mridShow}
-            </code>
-          </div>
-          <div>
-            <span className="text-zinc-500">DRID (from subject)</span>{" "}
-            <code className="rounded bg-zinc-100 px-1 dark:bg-zinc-900">
-              {dridShow}
-            </code>
-          </div>
-          <div className="text-xs text-zinc-500">
-            Internal date: {formatQueueDate(row.internal_date_ms)}
-          </div>
-          {row.attachment_filename ? (
-            <div className="text-xs text-zinc-500">
-              Attachment: {row.attachment_filename}
-              {row.attachment_mime ? ` (${row.attachment_mime})` : ""}
-            </div>
-          ) : (
-            <div className="text-xs text-amber-700 dark:text-amber-400">
-              No supported PDF/image attachment detected in metadata.
-            </div>
-          )}
-          {row.snippet ? (
-            <p className="text-xs text-zinc-600 dark:text-zinc-400">
-              {row.snippet}
-            </p>
-          ) : null}
-          {row.error_message ? (
-            <p className="text-xs text-red-600 dark:text-red-400">
-              {row.error_message}
-            </p>
-          ) : null}
-        </div>
-        <div className="flex shrink-0 flex-col gap-2">
-          <a
-            href={downloadHref}
-            className="rounded border border-zinc-300 px-3 py-1.5 text-center text-sm dark:border-zinc-600"
-          >
-            Download attachment
-          </a>
-        </div>
+    <span
+      className={`inline-block rounded px-1.5 py-0.5 font-mono text-[10px] uppercase ${cls[color]}`}
+    >
+      {label}
+    </span>
+  );
+}
+
+function ConfPill({ score }: { score: number }) {
+  const color =
+    score >= 80
+      ? "text-green-600 dark:text-green-400"
+      : score >= 50
+        ? "text-yellow-600 dark:text-yellow-400"
+        : "text-red-600 dark:text-red-400";
+  return <span className={`text-xs font-semibold ${color}`}>{score}%</span>;
+}
+
+function OdooBadge({ status }: { status: string | null }) {
+  if (!status) return null;
+  const map: Record<string, "green" | "yellow" | "red" | "zinc"> = {
+    matched: "green",
+    ambiguous: "yellow",
+    no_match: "red",
+    skipped: "zinc",
+    error: "red",
+  };
+  return <Badge label={status} color={map[status] ?? "zinc"} />;
+}
+
+function EmptyState({ text }: { text: string }) {
+  return (
+    <p className="py-8 text-center text-xs text-zinc-400 dark:text-zinc-600">
+      {text}
+    </p>
+  );
+}
+
+// ─── Kanban Column ────────────────────────────────────────────────────────────
+
+function KanbanCol({
+  title,
+  count,
+  accent,
+  grow,
+  children,
+}: {
+  title: string;
+  count: number;
+  accent: string;
+  grow?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className={`flex flex-col rounded-xl border border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/40 ${grow ? "min-w-80 flex-1" : "w-72 shrink-0"}`}>
+      <div
+        className={`flex items-center gap-2 border-b border-zinc-200 px-4 py-3 dark:border-zinc-800 ${accent}`}
+      >
+        <span className="text-sm font-semibold">{title}</span>
+        <span className="ml-auto rounded-full bg-white px-2 py-0.5 text-xs font-bold shadow-sm dark:bg-zinc-800">
+          {count}
+        </span>
+      </div>
+      <div className="flex-1 space-y-3 overflow-y-auto p-3">{children}</div>
+    </div>
+  );
+}
+
+// ─── Inbox card (unprocessed email) ──────────────────────────────────────────
+
+function InboxCard({ row }: { row: GmailQueueRow }) {
+  const isFailed = row.status === "failed";
+  return (
+    <article className="rounded-lg border border-zinc-200 bg-white p-3 text-sm shadow-sm dark:border-zinc-700 dark:bg-zinc-900">
+      <div className="mb-1 flex items-start gap-2">
+        <span className="min-w-0 flex-1 truncate font-medium text-sm">
+          {row.attachment_filename ?? row.subject ?? "No subject"}
+        </span>
+        <Badge label={row.status} color={isFailed ? "red" : "zinc"} />
+      </div>
+      {row.subject && row.attachment_filename ? (
+        <p className="mb-1 truncate text-xs text-zinc-500">{row.subject}</p>
+      ) : null}
+      {row.snippet ? (
+        <p className="mb-2 line-clamp-2 text-xs text-zinc-400 dark:text-zinc-500">
+          {row.snippet}
+        </p>
+      ) : null}
+      <div className="flex flex-wrap gap-x-3 text-xs text-zinc-400">
+        <span>{relativeTime(row.internal_date_ms)}</span>
+        {row.attachment_mime ? (
+          <span className="truncate">{row.attachment_mime}</span>
+        ) : (
+          <span className="text-amber-600 dark:text-amber-400">No attachment</span>
+        )}
+      </div>
+      {row.error_message ? (
+        <p className="mt-1 text-xs text-red-600 dark:text-red-400">
+          {row.error_message}
+        </p>
+      ) : null}
+    </article>
+  );
+}
+
+// ─── Processing cards ─────────────────────────────────────────────────────────
+
+function GmailProcessingCard({ row }: { row: GmailQueueRow }) {
+  return (
+    <article className="rounded-lg border border-amber-200 bg-white p-3 shadow-sm dark:border-amber-900/50 dark:bg-zinc-900">
+      <div className="mb-1 flex items-center gap-2">
+        <span className="min-w-0 flex-1 truncate text-sm font-medium">
+          {row.attachment_filename ?? row.subject ?? "Ingesting…"}
+        </span>
+        <Badge label="intake" color="amber" />
+      </div>
+      {row.subject ? (
+        <p className="truncate text-xs text-zinc-500">{row.subject}</p>
+      ) : null}
+      <p className="mt-1 text-xs text-zinc-400">
+        Started {relativeTime(row.processing_started_at ?? row.created_at)}
+      </p>
+      <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-zinc-100 dark:bg-zinc-800">
+        <div className="h-full w-1/3 animate-pulse rounded-full bg-amber-400" />
       </div>
     </article>
   );
 }
 
+// ─── Processed email card (Column 3) ─────────────────────────────────────────
+
+function InlineClientItem({
+  flat,
+  onOpenSplit,
+}: {
+  flat: FlatClientItem;
+  onOpenSplit: (docId: string, index: number) => void;
+}) {
+  const { item, reviewReasons: reasons } = flat;
+  const needsReview = reasons.length > 0;
+  return (
+    <div
+      className={`rounded border p-2 text-xs ${
+        needsReview
+          ? "border-amber-200 bg-amber-50 dark:border-amber-900/50 dark:bg-amber-900/10"
+          : "border-zinc-100 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-800/40"
+      }`}
+    >
+      <Link href={`/dashboard/review/${flat.docId}?item=${item.index}`} className="block">
+        <div className="flex items-start gap-2 hover:opacity-80">
+          <span className="min-w-0 flex-1 truncate font-medium">
+            {item.name || "—"}
+          </span>
+          {item.confidence != null ? <ConfPill score={item.confidence} /> : null}
+          <OdooBadge status={item.odoo_match_status} />
+        </div>
+      </Link>
+      <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-zinc-500">
+        <span>UEN: {item.UEN}</span>
+        <span>pp. {item.page_range}</span>
+        {item.classification ? (
+          <Badge label={item.classification} color="blue" />
+        ) : null}
+        {item.odoo_contact_email ? (
+          <span className="truncate">{item.odoo_contact_email}</span>
+        ) : null}
+      </div>
+      {needsReview ? (
+        <div className="mt-1 flex flex-wrap gap-1">
+          {reasons.map((r) => (
+            <span
+              key={r}
+              className="rounded bg-amber-100 px-1 py-0.5 text-[10px] text-amber-800 dark:bg-amber-900/40 dark:text-amber-300"
+            >
+              {r}
+            </span>
+          ))}
+        </div>
+      ) : null}
+      {item.split_path ? (
+        <button
+          type="button"
+          onClick={() => onOpenSplit(flat.docId, item.index)}
+          className="mt-1 text-blue-600 underline dark:text-blue-400"
+        >
+          View PDF
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+function ProcessedDocCard({
+  doc,
+  onOpenSplit,
+}: {
+  doc: DashboardDoc;
+  onOpenSplit: (docId: string, index: number) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const flatItems = useMemo(() => flattenClientItems([doc]), [doc]);
+  const hasItems = flatItems.length > 0;
+  const mi = mailItem(doc);
+  const needsReviewCount = flatItems.filter((f) => f.reviewReasons.length > 0).length;
+
+  return (
+    <article className="rounded-lg border border-zinc-200 bg-white p-3 text-sm shadow-sm dark:border-zinc-700 dark:bg-zinc-900">
+      <Link href={`/dashboard/review/${doc.id}`} className="block">
+        <div className="mb-1 flex items-start gap-2 hover:opacity-80">
+          <span className="min-w-0 flex-1 truncate font-medium">
+            {mi?.sender ?? doc.file_path?.split("/").pop() ?? doc.drid}
+          </span>
+          <Badge label="done" color="green" />
+        </div>
+      </Link>
+      {doc.classification_label ? (
+        <div className="mb-1 flex items-center gap-1.5">
+          <Badge label={doc.classification_label} color="blue" />
+          {doc.classification_confidence != null ? (
+            <ConfPill score={doc.classification_confidence} />
+          ) : null}
+        </div>
+      ) : null}
+      <div className="flex flex-wrap items-center gap-x-3 text-xs text-zinc-400">
+        <span>{relativeTime(doc.ocr_clients_completed_at ?? doc.created_at)}</span>
+        {needsReviewCount > 0 ? (
+          <Link href={`/dashboard/review/${doc.id}`} className="text-amber-500 hover:underline">
+            {needsReviewCount} need review
+          </Link>
+        ) : null}
+        {hasItems ? (
+          <button
+            type="button"
+            onClick={() => setExpanded((e) => !e)}
+            className="ml-auto text-blue-600 hover:underline dark:text-blue-400"
+          >
+            {expanded
+              ? "Hide items"
+              : `${flatItems.length} client${flatItems.length === 1 ? "" : "s"} →`}
+          </button>
+        ) : null}
+      </div>
+      {expanded && hasItems ? (
+        <div className="mt-3 space-y-2 border-t border-zinc-100 pt-3 dark:border-zinc-800">
+          {flatItems.map((flat) => (
+            <InlineClientItem
+              key={`${flat.docId}-${flat.item.index}`}
+              flat={flat}
+              onOpenSplit={onOpenSplit}
+            />
+          ))}
+        </div>
+      ) : null}
+    </article>
+  );
+}
+
+// ─── Review card (Column 4) ───────────────────────────────────────────────────
+
+function ReviewCard({ flat }: { flat: FlatClientItem }) {
+  const { item, drid, docId, reviewReasons: reasons } = flat;
+  return (
+    <Link href={`/dashboard/review/${docId}`} className="block">
+      <article className="cursor-pointer rounded-lg border border-amber-200 bg-white p-3 shadow-sm transition-colors hover:border-amber-400 hover:bg-amber-50 dark:border-amber-900/50 dark:bg-zinc-900 dark:hover:border-amber-600 dark:hover:bg-zinc-800">
+        <div className="mb-1 flex items-start gap-2">
+          <span className="min-w-0 flex-1 truncate text-sm font-medium">
+            {item.name || "—"}
+          </span>
+          <OdooBadge status={item.odoo_match_status} />
+        </div>
+        <div className="mb-2 flex flex-wrap gap-1">
+          {reasons.map((r) => (
+            <span
+              key={r}
+              className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-800 dark:bg-amber-900/40 dark:text-amber-300"
+            >
+              {r}
+            </span>
+          ))}
+        </div>
+        <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-zinc-400">
+          <span>UEN: {item.UEN}</span>
+          <span>pp. {item.page_range}</span>
+          {item.confidence != null ? <ConfPill score={item.confidence} /> : null}
+          {item.classification ? (
+            <Badge label={item.classification} color="zinc" />
+          ) : null}
+        </div>
+        <p className="mt-1 font-mono text-[10px] text-zinc-400">{drid}</p>
+      </article>
+    </Link>
+  );
+}
+
+
+// ─── Stat pill ────────────────────────────────────────────────────────────────
+
+function Stat({
+  label,
+  value,
+  warn,
+}: {
+  label: string;
+  value: number;
+  warn?: boolean;
+}) {
+  return (
+    <div
+      className={`flex flex-col items-center rounded-lg border px-4 py-2 ${
+        warn && value > 0
+          ? "border-amber-300 bg-amber-50 dark:border-amber-800 dark:bg-amber-900/20"
+          : "border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900"
+      }`}
+    >
+      <span
+        className={`text-xl font-bold ${
+          warn && value > 0 ? "text-amber-700 dark:text-amber-300" : ""
+        }`}
+      >
+        {value}
+      </span>
+      <span className="text-xs text-zinc-500">{label}</span>
+    </div>
+  );
+}
+
+// ─── Main page ────────────────────────────────────────────────────────────────
+
 export default function DashboardPage() {
-  const [tab, setTab] = useState<Tab>("unprocessed");
   const [data, setData] = useState<OverviewResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [runningId, setRunningId] = useState<string | null>(null);
+  const [syncing, setSyncing] = useState(false);
+  const [runningIds, setRunningIds] = useState<Set<string>>(new Set());
+  const [globalError, setGlobalError] = useState<string | null>(null);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const load = useCallback(async (syncGmail = false) => {
-    setLoading(true);
+    if (syncGmail) setSyncing(true);
+    else setLoading((prev) => (prev || !data ? true : false));
     setError(null);
-    const controller = new AbortController();
-    const timeoutMs = 45_000;
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
       if (syncGmail) {
         try {
           await fetch("/api/dashboard/gmail-queue/sync", { method: "POST" });
+          // Trigger one intake poll tick so queued emails start processing immediately
+          fetch("/api/dashboard/gmail-queue/process", { method: "POST" }).catch(() => {});
         } catch {
-          /* sync is best-effort before overview */
+          /* best-effort */
         }
       }
-      const res = await fetch("/api/dashboard/overview", {
-        signal: controller.signal,
-      });
-      clearTimeout(timeout);
+      const res = await fetch("/api/dashboard/overview");
       const json: unknown = await res.json();
       if (!res.ok) {
         const o = json as { error?: string; detail?: string; hint?: string };
         setError(
           [o.error, o.detail, o.hint].filter(Boolean).join(" — ") ||
-            "Failed to load dashboard.",
+            "Failed to load.",
         );
         setData(null);
         return;
       }
       const overview = json as OverviewResponse;
-      if (!Array.isArray(overview.gmailUnprocessed)) {
+      if (!Array.isArray(overview.gmailUnprocessed))
         overview.gmailUnprocessed = [];
-      }
-      if (!Array.isArray(overview.gmailInProgress)) {
+      if (!Array.isArray(overview.gmailInProgress))
         overview.gmailInProgress = [];
-      }
+      if (!Array.isArray(overview.gmailProcessed)) overview.gmailProcessed = [];
       setData(overview);
     } catch (e) {
-      if (e instanceof Error && e.name === "AbortError") {
-        setError(
-          `Request timed out after ${timeoutMs / 1000}s. The overview API or Supabase may be unreachable from the server.`,
-        );
-      } else {
-        setError(e instanceof Error ? e.message : "Load failed.");
-      }
+      setError(e instanceof Error ? e.message : "Load failed.");
       setData(null);
     } finally {
-      clearTimeout(timeout);
       setLoading(false);
+      setSyncing(false);
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
     load(false);
   }, [load]);
 
-  async function runOcrClients(documentId: string) {
-    setRunningId(documentId);
-    setError(null);
-    try {
-      const res = await fetch(
-        `/api/dashboard/documents/${documentId}/run-ocr-clients`,
-        { method: "POST" },
-      );
-      const json: unknown = await res.json();
-      if (!res.ok) {
-        const o = json as { error?: string; detail?: string };
-        setError(
-          [o.error, o.detail].filter(Boolean).join(": ") || "Pipeline failed.",
-        );
-        return;
+  // Auto-refresh every 15s when something is active
+  useEffect(() => {
+    if (!data) return;
+    const hasActive =
+      data.gmailInProgress.length > 0 ||
+      data.processing.some((d) => d.ocr_clients_status === "processing") ||
+      runningIds.size > 0;
+    if (hasActive) {
+      intervalRef.current = setInterval(() => load(false), 15_000);
+    } else {
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
       }
-      await load(false);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Pipeline failed.");
-    } finally {
-      setRunningId(null);
     }
-  }
+    return () => {
+      if (intervalRef.current) clearInterval(intervalRef.current);
+    };
+  }, [data, load, runningIds]);
 
-  async function openSplitPdf(documentId: string, index: number) {
+  async function openSplitPdf(docId: string, index: number) {
     try {
       const res = await fetch(
-        `/api/dashboard/documents/${documentId}/splits/${index}/signed-url`,
+        `/api/dashboard/documents/${docId}/splits/${index}/signed-url`,
       );
       const json = (await res.json()) as { url?: string; error?: string };
       if (!res.ok || !json.url) {
-        setError(json.error ?? "Could not open PDF.");
+        setGlobalError(json.error ?? "Could not open PDF.");
         return;
       }
       window.open(json.url, "_blank", "noopener,noreferrer");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Open PDF failed.");
+      setGlobalError(e instanceof Error ? e.message : "Open PDF failed.");
     }
   }
 
+  const allClientItems = useMemo(
+    () => flattenClientItems(data?.processed ?? []),
+    [data],
+  );
+  const reviewCount = allClientItems.filter(
+    (f) => f.reviewReasons.length > 0,
+  ).length;
+
+
+  const isActive =
+    (data?.gmailInProgress.length ?? 0) > 0 ||
+    (data?.processing ?? []).some((d) => d.ocr_clients_status === "processing");
+
   return (
-    <div className="mx-auto flex w-full max-w-6xl flex-col gap-6 p-6">
-      <header className="flex flex-wrap items-start justify-between gap-4">
+    <div className="flex h-screen flex-col overflow-hidden bg-zinc-50 dark:bg-zinc-950">
+      {/* ── Header ── */}
+      <header className="flex shrink-0 flex-wrap items-center gap-4 border-b border-zinc-200 bg-white px-6 py-4 dark:border-zinc-800 dark:bg-zinc-900">
         <div>
-          <p className="text-sm">
+          <div className="flex items-center gap-3">
             <Link
               href="/"
-              className="text-zinc-600 underline dark:text-zinc-400"
+              className="text-xs text-zinc-500 underline dark:text-zinc-400"
             >
               ← Intake
             </Link>
-          </p>
-          <h1 className="mt-1 text-2xl font-semibold">Production dashboard</h1>
-          <p className="mt-1 max-w-3xl text-sm text-zinc-600 dark:text-zinc-400">
-            <strong>Unprocessed</strong>: Gmail messages in the Unprocessed
-            label mirrored into the queue (refresh pulls from Gmail). MRID/DRID
-            show when the subject matches the pipe-separated ROS format;
-            otherwise IDs are assigned when intake runs. <strong>In progress</strong>:
-            one Gmail message is ingested at a time per cron tick; documents here
-            await or run OCR→clients. <strong>Processed</strong>: OCR→clients
-            completed.
-          </p>
+            <Link
+              href="/ocr-clients"
+              className="text-xs text-zinc-500 underline dark:text-zinc-400"
+            >
+              OCR→Clients tool
+            </Link>
+          </div>
+          <h1 className="mt-1 text-xl font-bold">AIMA Dashboard</h1>
         </div>
-        <button
-          type="button"
-          onClick={() => load(true)}
-          disabled={loading}
-          className="rounded border border-zinc-300 px-3 py-1.5 text-sm dark:border-zinc-600"
-        >
-          Refresh
-        </button>
+
+        {data ? (
+          <div className="flex flex-wrap gap-3 ml-4">
+            <Stat label="Inbox" value={data.gmailUnprocessed.length} />
+            <Stat
+              label="Processing"
+              value={data.gmailInProgress.length}
+              warn
+            />
+            <Stat label="Processed" value={data.processed.length} />
+            <Stat label="Clients" value={allClientItems.length} />
+            <Stat label="Needs Review" value={reviewCount} warn />
+          </div>
+        ) : null}
+
+        <div className="ml-auto flex items-center gap-3">
+          {isActive ? (
+            <span className="flex items-center gap-1.5 text-xs text-amber-600 dark:text-amber-400">
+              <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-amber-500" />
+              Live
+            </span>
+          ) : null}
+          <button
+            type="button"
+            onClick={() => load(true)}
+            disabled={loading || syncing}
+            className="rounded border border-zinc-300 px-3 py-1.5 text-sm disabled:opacity-50 dark:border-zinc-600"
+          >
+            {syncing ? "Syncing…" : loading ? "Loading…" : "Sync Gmail + Refresh"}
+          </button>
+        </div>
       </header>
 
-      {error ? (
-        <div className="rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-200">
-          {error}
+      {/* ── Error banner ── */}
+      {(error ?? globalError) ? (
+        <div className="shrink-0 border-b border-red-200 bg-red-50 px-6 py-2 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300">
+          {error ?? globalError}
+          <button
+            type="button"
+            className="ml-3 underline"
+            onClick={() => {
+              setError(null);
+              setGlobalError(null);
+            }}
+          >
+            dismiss
+          </button>
         </div>
       ) : null}
 
       {data?.gmailQueueHint ? (
-        <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100">
+        <div className="shrink-0 border-b border-amber-200 bg-amber-50 px-6 py-2 text-sm text-amber-800 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-200">
           {data.gmailQueueHint}
         </div>
       ) : null}
 
-      <div className="flex flex-wrap gap-2 border-b border-zinc-200 pb-2 dark:border-zinc-800">
-        {(
-          [
-            ["unprocessed", "Unprocessed"],
-            ["in_progress", "In progress"],
-            ["processed", "Processed"],
-          ] as const
-        ).map(([key, label]) => (
-          <button
-            key={key}
-            type="button"
-            onClick={() => setTab(key)}
-            className={`rounded-t px-3 py-2 text-sm font-medium ${
-              tab === key
-                ? "bg-zinc-200 dark:bg-zinc-800"
-                : "text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-900"
-            }`}
-          >
-            {label}
-            {data && key === "unprocessed"
-              ? ` (${data.gmailUnprocessed.length})`
-              : null}
-            {data && key === "in_progress"
-              ? ` (${data.gmailInProgress.length + data.processing.length})`
-              : null}
-            {data && key === "processed" ? ` (${data.processed.length})` : null}
-          </button>
-        ))}
-      </div>
-
       {loading && !data ? (
-        <p className="text-sm text-zinc-500">Loading…</p>
-      ) : null}
-
-      {data && tab === "unprocessed" ? (
-        <section className="space-y-4">
-          {data.gmailUnprocessed.length === 0 ? (
-            <p className="text-sm text-zinc-500">
-              No queued Gmail messages. Use Refresh (syncs from Gmail) or wait
-              for cron <code className="text-xs">/api/cron/intake-email</code>.
-            </p>
-          ) : null}
-          {data.gmailUnprocessed.map((row) => (
-            <GmailQueueCard key={row.id} row={row} />
-          ))}
-        </section>
-      ) : null}
-
-      {data && tab === "in_progress" ? (
-        <section className="space-y-6">
-          {data.gmailInProgress.length > 0 ? (
-            <div>
-              <h2 className="mb-2 text-sm font-medium text-zinc-700 dark:text-zinc-300">
-                Gmail intake (running)
-              </h2>
-              <div className="space-y-4">
-                {data.gmailInProgress.map((row) => (
-                  <GmailQueueCard key={row.id} row={row} />
-                ))}
-              </div>
-            </div>
-          ) : null}
-          <div>
-            <h2 className="mb-2 text-sm font-medium text-zinc-700 dark:text-zinc-300">
-              Documents — OCR→clients
-            </h2>
-            {data.processing.length === 0 ? (
-              <p className="text-sm text-zinc-500">
-                No documents in this bucket. After a message is ingested, rows
-                appear here until OCR→clients completes.
-              </p>
-            ) : null}
-            <div className="space-y-4">
-              {data.processing.map((doc) => (
-                <DocCard
-                  key={doc.id}
-                  doc={doc}
-                  runningId={runningId}
-                  onRun={() => runOcrClients(doc.id)}
-                  onOpenSplit={(idx) => openSplitPdf(doc.id, idx)}
-                />
-              ))}
-            </div>
-          </div>
-        </section>
-      ) : null}
-
-      {data && tab === "processed" ? (
-        <section className="space-y-4">
-          {data.processed.length === 0 ? (
-            <p className="text-sm text-zinc-500">
-              No documents have completed the OCR→clients pipeline yet.
-            </p>
-          ) : null}
-          {data.processed.map((doc) => (
-            <DocCard
-              key={doc.id}
-              doc={doc}
-              runningId={runningId}
-              onRun={() => runOcrClients(doc.id)}
-              onOpenSplit={(idx) => openSplitPdf(doc.id, idx)}
-              showRerun
-            />
-          ))}
-        </section>
-      ) : null}
-    </div>
-  );
-}
-
-function DocCard({
-  doc,
-  runningId,
-  onRun,
-  onOpenSplit,
-  showRerun,
-}: {
-  doc: DashboardDoc;
-  runningId: string | null;
-  onRun: () => void;
-  onOpenSplit: (index: number) => void;
-  showRerun?: boolean;
-}) {
-  const mi = mailItem(doc);
-  const mrid = mi?.mrid ?? "—";
-  const items = Array.isArray(doc.ocr_clients_items)
-    ? doc.ocr_clients_items
-    : [];
-  const busy = runningId === doc.id;
-  const canRun =
-    doc.ocr_clients_status !== "processing" &&
-    doc.file_path?.toLowerCase().endsWith(".pdf");
-
-  return (
-    <article className="rounded-lg border border-zinc-200 p-4 dark:border-zinc-800">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0 space-y-1 text-sm">
-          <div>
-            <span className="text-zinc-500">MRID</span>{" "}
-            <code className="rounded bg-zinc-100 px-1 dark:bg-zinc-900">
-              {mrid}
-            </code>
-          </div>
-          <div>
-            <span className="text-zinc-500">DRID</span>{" "}
-            <code className="rounded bg-zinc-100 px-1 dark:bg-zinc-900">
-              {doc.drid}
-            </code>
-          </div>
-          <div className="text-zinc-600 dark:text-zinc-400">
-            Doc status: {doc.status}
-            {doc.ocr_clients_status
-              ? ` · OCR→clients: ${doc.ocr_clients_status}`
-              : ""}
-          </div>
-          {doc.classification_label ? (
-            <div>
-              D2 label: {doc.classification_label}
-              {doc.classification_confidence != null
-                ? ` (${doc.classification_confidence}%)`
-                : ""}
-            </div>
-          ) : null}
-          {doc.split_total != null && doc.split_total > 1 ? (
-            <div className="text-xs text-zinc-500">
-              Intake split segment {doc.split_index ?? "?"}/{doc.split_total}
-            </div>
-          ) : null}
-          {doc.ocr_clients_error ? (
-            <div className="text-red-600 dark:text-red-400">
-              Last error: {doc.ocr_clients_error}
-            </div>
-          ) : null}
+        <div className="flex flex-1 items-center justify-center text-sm text-zinc-400">
+          Loading…
         </div>
-        <div className="flex shrink-0 flex-col gap-2">
-          {canRun ? (
-            <button
-              type="button"
-              disabled={busy}
-              onClick={onRun}
-              className="rounded bg-zinc-900 px-3 py-1.5 text-sm text-white disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
+      ) : (
+        <div className="flex min-h-0 flex-1 flex-col">
+          {/* ── 4-column Kanban ── */}
+          <div className="flex gap-4 overflow-x-auto p-4" style={{ minHeight: 320, maxHeight: "calc(100vh - 140px)" }}>
+            {/* Column 1 — Inbox */}
+            <KanbanCol
+              title="📥 Inbox"
+              count={data?.gmailUnprocessed.length ?? 0}
+              accent="text-zinc-700 dark:text-zinc-200"
             >
-              {busy
-                ? "Running…"
-                : showRerun
-                  ? "Re-run OCR→clients"
-                  : "Run OCR→clients"}
-            </button>
-          ) : (
-            <span className="text-xs text-zinc-500">
-              {doc.ocr_clients_status === "processing"
-                ? "Pipeline running…"
-                : "Not a PDF — cannot run pipeline."}
-            </span>
-          )}
-        </div>
-      </div>
+              {data?.gmailUnprocessed.length === 0 ? (
+                <EmptyState text="No unprocessed emails. Use Sync to pull from Gmail." />
+              ) : (
+                data?.gmailUnprocessed.map((row) => (
+                  <InboxCard key={row.id} row={row} />
+                ))
+              )}
+            </KanbanCol>
 
-      {doc.ocr_clients_ocr_summary &&
-      typeof doc.ocr_clients_ocr_summary === "object" ? (
-        <div className="mt-2 text-xs text-zinc-500">
-          OCR summary:{" "}
-          {JSON.stringify(doc.ocr_clients_ocr_summary).slice(0, 200)}…
-        </div>
-      ) : null}
-
-      {items.length > 0 ? (
-        <div className="mt-4 overflow-x-auto">
-          <table className="w-full border-collapse text-left text-sm">
-            <thead>
-              <tr className="border-b border-zinc-200 dark:border-zinc-700">
-                <th className="py-2 pr-2">#</th>
-                <th className="py-2 pr-2">Name</th>
-                <th className="py-2 pr-2">UEN</th>
-                <th className="py-2 pr-2">Type</th>
-                <th className="py-2 pr-2">Pages</th>
-                <th className="py-2">Split PDF</th>
-              </tr>
-            </thead>
-            <tbody>
-              {items.map((it) => (
-                <tr
-                  key={it.index}
-                  className="border-b border-zinc-100 dark:border-zinc-800"
-                >
-                  <td className="py-2 pr-2">{it.index}</td>
-                  <td className="py-2 pr-2">{it.name || "—"}</td>
-                  <td className="py-2 pr-2">{it.UEN || "—"}</td>
-                  <td className="py-2 pr-2">{it.document_type || "—"}</td>
-                  <td className="py-2 pr-2">
-                    {it.pageStart != null && it.pageEnd != null
-                      ? `${it.pageStart}–${it.pageEnd} (${it.page_range})`
-                      : it.page_range}
-                  </td>
-                  <td className="py-2">
-                    {it.split_path ? (
-                      <button
-                        type="button"
-                        onClick={() => onOpenSplit(it.index)}
-                        className="text-sm text-blue-600 underline dark:text-blue-400"
-                      >
-                        Open
-                      </button>
-                    ) : it.pdfError ? (
-                      <span className="text-red-600 text-xs dark:text-red-400">
-                        {it.pdfError}
-                      </span>
-                    ) : (
-                      "—"
-                    )}
-                  </td>
-                </tr>
+            {/* Column 2 — Processing */}
+            <KanbanCol
+              title="⚙️ Processing"
+              count={data?.gmailInProgress.length ?? 0}
+              accent="text-amber-700 dark:text-amber-300"
+            >
+              {(data?.gmailInProgress.length ?? 0) === 0 ? (
+                <EmptyState text="Nothing processing right now." />
+              ) : null}
+              {data?.gmailInProgress.map((row) => (
+                <GmailProcessingCard key={row.id} row={row} />
               ))}
-            </tbody>
-          </table>
+            </KanbanCol>
+
+            {/* Column 3 — Processed Documents */}
+            <KanbanCol
+              title="✅ Processed"
+              count={data?.processed.length ?? 0}
+              accent="text-green-700 dark:text-green-300"
+              grow
+            >
+              {(data?.processed.length ?? 0) === 0 ? (
+                <EmptyState text="No processed documents yet." />
+              ) : (
+                data?.processed.map((doc) => (
+                  <ProcessedDocCard
+                    key={doc.id}
+                    doc={doc}
+                    onOpenSplit={openSplitPdf}
+                  />
+                ))
+              )}
+            </KanbanCol>
+
+            {/* Column 4 — Needs Review */}
+            <KanbanCol
+              title="⚠️ Needs Review"
+              count={reviewCount}
+              accent="text-amber-700 dark:text-amber-300"
+              grow
+            >
+              {reviewCount === 0 ? (
+                <EmptyState text="No items flagged for review." />
+              ) : (
+                allClientItems
+                  .filter((f) => f.reviewReasons.length > 0)
+                  .map((f) => (
+                    <ReviewCard
+                      key={`${f.docId}-${f.item.index}`}
+                      flat={f}
+                    />
+                  ))
+              )}
+            </KanbanCol>
+          </div>
         </div>
-      ) : null}
-    </article>
+      )}
+    </div>
   );
 }

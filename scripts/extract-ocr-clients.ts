@@ -86,7 +86,7 @@ async function main() {
   if (outPath) {
     const absOut = resolve(process.cwd(), outPath);
     writeFileSync(absOut, `${jsonOut}\n`, "utf8");
-    console.error(`Wrote ${rows.length} row(s) to ${absOut}`);
+    console.error(`Wrote ${rows.items.length} row(s) to ${absOut}`);
   }
 
   console.log(jsonOut);

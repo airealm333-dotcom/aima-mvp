@@ -6,6 +6,7 @@ import {
   type GmailIntakeClient,
 } from "@/lib/gmail-intake";
 import { parseMridDridFromSubject } from "@/lib/mail-subject";
+import { runOcrClientsForDocument } from "@/lib/run-ocr-clients-for-doc";
 import type { SupabaseAdminBundle } from "@/lib/supabase-admin";
 
 const QUEUE_TABLE = "gmail_intake_queue";
@@ -384,6 +385,18 @@ export async function runEmailIntakePoll(
       processing_started_at: null,
     });
     return result;
+  }
+
+  // Run OCR→Clients for each document created during intake (sequential)
+  for (const docId of intake.documentIds) {
+    try {
+      await runOcrClientsForDocument(supabase, docId);
+    } catch (e) {
+      // OCR failure is non-fatal for the queue row — doc is marked failed internally
+      result.errors.push(
+        `ocr_clients:${docId}:${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
   }
 
   await finalizeQueueRow(supabase, row.id, {

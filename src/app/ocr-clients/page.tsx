@@ -27,16 +27,27 @@ type ClientItem = {
   name: string;
   UEN: string;
   document_type: string;
+  classification: string;
+  confidence: number;
   page_range: string;
   pageStart: number | null;
   pageEnd: number | null;
   pdfBase64: string | null;
   pdfError: string | null;
+  odoo_match_status: string | null;
+  odoo_partner_id: number | null;
+  odoo_match_score: number | null;
+  odoo_match_method: string | null;
+  odoo_contact_email: string | null;
+  odoo_resolution_method: string | null;
+  odoo_accounting_manager_email: string | null;
+  odoo_accounting_manager_name: string | null;
 };
 
 type SuccessPayload = {
   fileName: string;
   ocr: OcrSummary;
+  overall_confidence: number;
   items: ClientItem[];
 };
 
@@ -132,26 +143,47 @@ export default function OcrClientsPage() {
     const slim = {
       fileName: result.fileName,
       ocr: result.ocr,
+      overall_confidence: result.overall_confidence,
       items: result.items.map(
         ({
           index,
           name,
           UEN,
           document_type,
+          classification,
+          confidence,
           page_range,
           pageStart,
           pageEnd,
           pdfError,
+          odoo_match_status,
+          odoo_partner_id,
+          odoo_match_score,
+          odoo_match_method,
+          odoo_contact_email,
+          odoo_resolution_method,
+          odoo_accounting_manager_email,
+          odoo_accounting_manager_name,
         }) => ({
           index,
           name,
           UEN,
           document_type,
+          classification,
+          confidence,
           page_range,
           pageStart,
           pageEnd,
           pdfBase64: "(omitted)",
           pdfError,
+          odoo_match_status,
+          odoo_partner_id,
+          odoo_match_score,
+          odoo_match_method,
+          odoo_contact_email,
+          odoo_resolution_method,
+          odoo_accounting_manager_email,
+          odoo_accounting_manager_name,
         }),
       ),
     };
@@ -238,6 +270,12 @@ export default function OcrClientsPage() {
               <li>Pages: {result.ocr.pageCount}</li>
               <li>Provider: {result.ocr.provider}</li>
               <li>Text length: {result.ocr.textLength}</li>
+              <li>
+                Overall extraction confidence:{" "}
+                <span className="font-semibold text-zinc-900 dark:text-zinc-100">
+                  {result.overall_confidence}%
+                </span>
+              </li>
               {result.ocr.pageAlignment ? (
                 <li>
                   Alignment note: OCR segments before align ={" "}
@@ -268,9 +306,23 @@ export default function OcrClientsPage() {
                         <strong>UEN:</strong> {item.UEN || "—"}
                       </span>
                     </div>
-                    <div>
-                      <strong>Document type:</strong>{" "}
-                      {item.document_type || "—"}
+                    <div className="flex flex-wrap gap-x-4 gap-y-1">
+                      <span>
+                        <strong>Document type:</strong>{" "}
+                        {item.document_type || "—"}
+                      </span>
+                      <span>
+                        <strong>Classification:</strong>{" "}
+                        <span className="rounded bg-zinc-200 px-1.5 py-0.5 font-mono text-xs dark:bg-zinc-700">
+                          {item.classification || "—"}
+                        </span>
+                      </span>
+                      <span>
+                        <strong>Confidence:</strong>{" "}
+                        <span className={`font-semibold ${item.confidence >= 80 ? "text-green-600 dark:text-green-400" : item.confidence >= 50 ? "text-yellow-600 dark:text-yellow-400" : "text-red-600 dark:text-red-400"}`}>
+                          {item.confidence}%
+                        </span>
+                      </span>
                     </div>
                     <div>
                       <strong>page_range (model):</strong> {item.page_range}
@@ -281,6 +333,75 @@ export default function OcrClientsPage() {
                         </span>
                       ) : null}
                     </div>
+                    {item.odoo_match_status ? (
+                      <div className="mt-1 border-t border-zinc-200 pt-2 dark:border-zinc-700">
+                        <div className="flex flex-wrap gap-x-4 gap-y-1">
+                          <span>
+                            <strong>Odoo match:</strong>{" "}
+                            <span
+                              className={`rounded px-1.5 py-0.5 font-mono text-xs ${
+                                item.odoo_match_status === "matched"
+                                  ? "bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300"
+                                  : item.odoo_match_status === "ambiguous"
+                                    ? "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/40 dark:text-yellow-300"
+                                    : item.odoo_match_status === "no_match"
+                                      ? "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300"
+                                      : item.odoo_match_status === "skipped"
+                                        ? "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400"
+                                        : "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300"
+                              }`}
+                            >
+                              {item.odoo_match_status}
+                            </span>
+                          </span>
+                          {item.odoo_match_score != null ? (
+                            <span>
+                              <strong>Score:</strong> {item.odoo_match_score}
+                            </span>
+                          ) : null}
+                          {item.odoo_match_method ? (
+                            <span>
+                              <strong>Method:</strong>{" "}
+                              <span className="font-mono text-xs">
+                                {item.odoo_match_method}
+                              </span>
+                            </span>
+                          ) : null}
+                          {item.odoo_partner_id != null ? (
+                            <span>
+                              <strong>Partner ID:</strong>{" "}
+                              {item.odoo_partner_id}
+                            </span>
+                          ) : null}
+                        </div>
+                        {item.odoo_contact_email ? (
+                          <div className="mt-1">
+                            <strong>Primary contact:</strong>{" "}
+                            <span className="font-mono text-xs">
+                              {item.odoo_contact_email}
+                            </span>
+                            {item.odoo_resolution_method ? (
+                              <span className="ml-2 text-zinc-500 dark:text-zinc-400">
+                                ({item.odoo_resolution_method})
+                              </span>
+                            ) : null}
+                          </div>
+                        ) : null}
+                        {item.odoo_accounting_manager_email ? (
+                          <div className="mt-1">
+                            <strong>Accounting manager:</strong>{" "}
+                            {item.odoo_accounting_manager_name ? (
+                              <span className="mr-1">
+                                {item.odoo_accounting_manager_name}
+                              </span>
+                            ) : null}
+                            <span className="font-mono text-xs">
+                              {item.odoo_accounting_manager_email}
+                            </span>
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
                     {item.pdfError ? (
                       <p className="text-red-600 dark:text-red-400">
                         PDF slice: {item.pdfError}

@@ -54,13 +54,25 @@ export async function GET() {
     gmailInProgress = gqProc.data ?? [];
   }
 
+  let gmailProcessed: unknown[] = [];
+  const gqDone = await supabase.client
+    .from("gmail_intake_queue")
+    .select(GMAIL_QUEUE_SELECT)
+    .eq("status", "ingested")
+    .order("ingested_at" as never, { ascending: false, nullsFirst: false })
+    .limit(100);
+
+  if (!gqDone.error) {
+    gmailProcessed = gqDone.data ?? [];
+  }
+
   const procRes = await supabase.client
     .from("documents")
     .select(
       `${DOC_SELECT}, mail_items ( mrid, received_at, sender, addressee )`,
     )
     .or(
-      "ocr_clients_status.is.null,ocr_clients_status.eq.processing,ocr_clients_status.eq.failed",
+      "ocr_clients_status.eq.processing,ocr_clients_status.eq.failed",
     )
     .order("created_at", { ascending: false })
     .limit(100);
@@ -107,6 +119,7 @@ export async function GET() {
   return NextResponse.json({
     gmailUnprocessed,
     gmailInProgress,
+    gmailProcessed,
     ...(gmailQueueHint ? { gmailQueueHint } : {}),
     processing: procRes.data ?? [],
     processed: doneRes.data ?? [],

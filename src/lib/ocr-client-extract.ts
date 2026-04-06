@@ -16,9 +16,14 @@ export type ClassificationLabel = (typeof CLASSIFICATION_LABELS)[number];
 
 /** Same contract as `scripts/extract-ocr-clients.ts` / Claude system prompt. */
 export const OCR_CLIENT_EXTRACT_SYSTEM_PROMPT = `You are a document analysis assistant. Extract all distinct clients/entities from the provided document text.
-Return ONLY a valid JSON array with no additional text, explanation, or markdown formatting.
-Each object must follow this exact structure:
-{"name": "", "UEN": "", "document_type": "", "page_range": "", "classification": ""}
+Return ONLY a valid JSON object with no additional text, explanation, or markdown formatting.
+The object must follow this exact structure:
+{
+  "overall_confidence": 0,
+  "items": [
+    {"name": "", "UEN": "", "document_type": "", "page_range": "", "classification": "", "confidence": 0}
+  ]
+}
 
 Rules:
 - If UEN is not found, use "Null"
@@ -33,7 +38,11 @@ Rules:
   - LEGAL: contracts, agreements, court documents, legal notices
   - UTILITY_PROPERTY: utility bills, property tax, tenancy agreements, SP services
   - GENERAL: general business correspondence, invoices, receipts not covered above
-  - UNKNOWN: cannot determine the document type`;
+  - UNKNOWN: cannot determine the document type
+
+Confidence scoring (integer 0-100):
+- confidence (per item): how certain you are about the extracted fields for that specific document split — consider name clarity, UEN presence, page boundary sharpness, and text quality for those pages
+- overall_confidence: how confident you are in the completeness and accuracy of the entire extraction — penalise for poor OCR quality, overlapping page ranges, ambiguous boundaries, or missing entities`;
 
 export type OcrClientExtractRow = {
   name: string;
@@ -41,6 +50,12 @@ export type OcrClientExtractRow = {
   document_type: string;
   page_range: string;
   classification: ClassificationLabel;
+  confidence: number;
+};
+
+export type OcrClientExtractResult = {
+  overall_confidence: number;
+  items: OcrClientExtractRow[];
 };
 
 function stripJsonFences(raw: string): string {
@@ -51,21 +66,36 @@ function stripJsonFences(raw: string): string {
     .trim();
 }
 
-function parseModelJsonArray(raw: string): unknown {
+function parseModelJson(raw: string): unknown {
   return JSON.parse(stripJsonFences(raw)) as unknown;
 }
 
-export function normalizeOcrClientExtractRows(
+function clampConfidence(v: unknown): number {
+  const n = v != null && typeof v === "number" ? v : Number(v);
+  if (!Number.isFinite(n)) return 50;
+  return Math.round(Math.min(100, Math.max(0, n)));
+}
+
+export function normalizeOcrClientExtractResult(
   parsed: unknown,
-): OcrClientExtractRow[] {
-  if (!Array.isArray(parsed)) {
-    throw new Error("Model output is not a JSON array.");
+): OcrClientExtractResult {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Model output is not a JSON object.");
   }
-  const out: OcrClientExtractRow[] = [];
-  for (let i = 0; i < parsed.length; i += 1) {
-    const row = parsed[i];
+  const root = parsed as Record<string, unknown>;
+
+  const overall_confidence = clampConfidence(root.overall_confidence ?? 50);
+
+  const rawItems = root.items;
+  if (!Array.isArray(rawItems)) {
+    throw new Error('Model output missing "items" array.');
+  }
+
+  const items: OcrClientExtractRow[] = [];
+  for (let i = 0; i < rawItems.length; i += 1) {
+    const row = rawItems[i];
     if (!row || typeof row !== "object") {
-      throw new Error(`Invalid row at index ${i}: not an object.`);
+      throw new Error(`Invalid item at index ${i}: not an object.`);
     }
     const r = row as Record<string, unknown>;
     const name = r.name != null ? String(r.name).trim() : "";
@@ -75,14 +105,19 @@ export function normalizeOcrClientExtractRows(
       r.document_type != null ? String(r.document_type).trim() : "";
     const page_range = r.page_range != null ? String(r.page_range).trim() : "";
     const rawClassification =
-      r.classification != null ? String(r.classification).trim().toUpperCase() : "";
-    const classification: ClassificationLabel =
-      (CLASSIFICATION_LABELS as readonly string[]).includes(rawClassification)
-        ? (rawClassification as ClassificationLabel)
-        : "UNKNOWN";
-    out.push({ name, UEN, document_type, page_range, classification });
+      r.classification != null
+        ? String(r.classification).trim().toUpperCase()
+        : "";
+    const classification: ClassificationLabel = (
+      CLASSIFICATION_LABELS as readonly string[]
+    ).includes(rawClassification)
+      ? (rawClassification as ClassificationLabel)
+      : "UNKNOWN";
+    const confidence = clampConfidence(r.confidence ?? 50);
+    items.push({ name, UEN, document_type, page_range, classification, confidence });
   }
-  return out;
+
+  return { overall_confidence, items };
 }
 
 function resolveAnthropicModel(): string {
@@ -99,7 +134,7 @@ function resolveAnthropicModel(): string {
 export async function extractOcrClientRowsFromDocumentText(
   documentText: string,
   options?: { apiKey?: string },
-): Promise<OcrClientExtractRow[]> {
+): Promise<OcrClientExtractResult> {
   const trimmed = documentText.trim();
   if (!trimmed) {
     throw new Error("Document text is empty.");
@@ -122,13 +157,18 @@ ${trimmed}`;
     messages: [{ role: "user", content: userMessage }],
   });
 
+  const { input_tokens, output_tokens } = response.usage;
+  console.log(
+    `[ocr-client-extract] tokens — input: ${input_tokens}, output: ${output_tokens}, total: ${input_tokens + output_tokens} | model: ${response.model}`,
+  );
+
   const block = response.content[0];
   const text = block?.type === "text" ? block.text : "";
   if (!text.trim()) {
     throw new Error("Empty response from model.");
   }
 
-  return normalizeOcrClientExtractRows(parseModelJsonArray(text));
+  return normalizeOcrClientExtractResult(parseModelJson(text));
 }
 
 /**

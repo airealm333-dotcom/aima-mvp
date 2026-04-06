@@ -159,13 +159,20 @@ export class OdooJsonRpcClient {
     fields: string[],
     limit: number,
   ): Promise<Record<string, unknown>[]> {
-    const result = await this.executeKw(
-      uid,
-      "res.partner",
-      "search_read",
-      [domain],
-      { fields, limit },
-    );
+    return this.searchRead(uid, "res.partner", domain, fields, limit);
+  }
+
+  async searchRead(
+    uid: number,
+    model: string,
+    domain: unknown[],
+    fields: string[],
+    limit: number,
+  ): Promise<Record<string, unknown>[]> {
+    const result = await this.executeKw(uid, model, "search_read", [domain], {
+      fields,
+      limit,
+    });
 
     if (!Array.isArray(result)) {
       throw new OdooJsonRpcError("search_read did not return an array");
