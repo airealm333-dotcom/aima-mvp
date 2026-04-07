@@ -29,14 +29,12 @@ type StoredOcrItem = {
   odoo_match_score: number | null;
   odoo_match_method: string | null;
   odoo_contact_email: string | null;
-  odoo_contact_name: string | null;
   odoo_resolution_method: string | null;
   odoo_accounting_manager_email: string | null;
   odoo_accounting_manager_name: string | null;
   dispatched_at: string | null;
   sender_name: string | null;
   sender_address: string | null;
-  document_date: string | null;
 };
 
 export type OcrClientsDocResult = {
@@ -147,14 +145,12 @@ export async function runOcrClientsForDocument(
         odoo_match_score: it.odoo_match_score,
         odoo_match_method: it.odoo_match_method,
         odoo_contact_email: it.odoo_contact_email,
-        odoo_contact_name: it.odoo_contact_name,
         odoo_resolution_method: it.odoo_resolution_method,
         odoo_accounting_manager_email: it.odoo_accounting_manager_email,
         odoo_accounting_manager_name: it.odoo_accounting_manager_name,
         dispatched_at: existingDispatchedAt.get(it.index) ?? null,
         sender_name: it.sender_name === "Null" ? null : (it.sender_name || null),
         sender_address: it.sender_address === "Null" ? null : (it.sender_address || null),
-        document_date: it.document_date === "Null" ? null : (it.document_date || null),
       });
     }
 

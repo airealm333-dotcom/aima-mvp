@@ -32,12 +32,10 @@ export type OcrClientsPipelineItemInternal = {
   odoo_match_method: string | null;
   odoo_contact_email: string | null;
   odoo_resolution_method: string | null;
-  odoo_contact_name: string | null;
   odoo_accounting_manager_email: string | null;
   odoo_accounting_manager_name: string | null;
   sender_name: string | null;
   sender_address: string | null;
-  document_date: string | null;
 };
 
 export type OcrClientsPipelineResult = {
@@ -73,12 +71,10 @@ export async function runOcrClientsPipelineOnPdfBuffer(
         odoo_match_method: null as string | null,
         odoo_contact_email: null as string | null,
         odoo_resolution_method: null as string | null,
-        odoo_contact_name: null as string | null,
         odoo_accounting_manager_email: null as string | null,
         odoo_accounting_manager_name: null as string | null,
         sender_name: row.sender_name === "Null" ? null : (row.sender_name || null),
         sender_address: row.sender_address === "Null" ? null : (row.sender_address || null),
-        document_date: row.document_date === "Null" ? null : (row.document_date || null),
       };
 
       if (!pr) {
@@ -182,7 +178,6 @@ async function runOdooMatchingForItems(
         const matchResult = await runOdooClientMatch(client, uid, cfg, inputs);
 
         let odoo_contact_email: string | null = null;
-        let odoo_contact_name: string | null = null;
         let odoo_resolution_method: string | null = null;
         let odoo_accounting_manager_email: string | null = null;
         let odoo_accounting_manager_name: string | null = null;
@@ -196,7 +191,6 @@ async function runOdooMatchingForItems(
           });
           if (d4.resolutionMethod !== "not_found") {
             odoo_contact_email = d4.email;
-            odoo_contact_name = d4.contactName;
             odoo_resolution_method = d4.resolutionMethod;
           }
           odoo_accounting_manager_email = d4.accountingManagerEmail;
@@ -210,7 +204,6 @@ async function runOdooMatchingForItems(
           odoo_match_score: matchResult.score,
           odoo_match_method: matchResult.method,
           odoo_contact_email,
-          odoo_contact_name,
           odoo_resolution_method,
           odoo_accounting_manager_email,
           odoo_accounting_manager_name,
@@ -223,7 +216,6 @@ async function runOdooMatchingForItems(
           odoo_match_score: null,
           odoo_match_method: null,
           odoo_contact_email: null,
-          odoo_contact_name: null,
           odoo_resolution_method: null,
           odoo_accounting_manager_email: null,
           odoo_accounting_manager_name: null,
