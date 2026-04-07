@@ -55,7 +55,7 @@ function buildEmailBody(item: DispatchItem): string {
   <p style="margin:0 0 4px;"><strong>Account Manager:</strong> ${accountManagerLine}</p>
   <p style="margin:0 0 20px;"><strong>Client Email Id:</strong> ${item.odoo_contact_email ?? "—"}</p>
 
-  <p style="margin:0 0 20px;">Dear ${item.odoo_contact_name || clientName},</p>
+  <p style="margin:0 0 20px;">Dear ${(item.odoo_resolution_method === "primary_contact" || item.odoo_resolution_method === "secondary_contact") && item.odoo_contact_name ? item.odoo_contact_name : "Sir/Madam"},</p>
 
   <p style="margin:0 0 20px;line-height:1.6;">We have received physical correspondence addressed to your entity, details of which are set out below for your review and necessary action.</p>
 
