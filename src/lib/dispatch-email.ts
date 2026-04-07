@@ -29,6 +29,8 @@ export type DispatchItem = {
   odoo_accounting_manager_name: string | null;
   odoo_accounting_manager_email: string | null;
   dispatched_at: string | null;
+  sender_name: string | null;
+  sender_address: string | null;
 };
 
 export type DispatchResult = {
@@ -54,6 +56,8 @@ function buildEmailBody(item: DispatchItem, drid: string): string {
     ${line("Client Name", item.name)}
     ${line("UEN", item.UEN === "Null" ? "—" : item.UEN)}
     ${line("Document Type", item.document_type || item.classification)}
+    ${line("Sender", item.sender_name)}
+    ${line("Sender Address", item.sender_address)}
     ${line("Pages", item.page_range)}
     ${line("Confidence", item.confidence != null ? `${Math.round(item.confidence)}%` : null)}
     <tr><td colspan="2" style="padding:8px 0;"><hr style="border:none;border-top:1px solid #e5e7eb;"></td></tr>

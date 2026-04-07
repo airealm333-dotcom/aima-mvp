@@ -21,7 +21,7 @@ The object must follow this exact structure:
 {
   "overall_confidence": 0,
   "items": [
-    {"name": "", "UEN": "", "document_type": "", "page_range": "", "classification": "", "confidence": 0}
+    {"name": "", "UEN": "", "document_type": "", "page_range": "", "classification": "", "confidence": 0, "sender_name": "", "sender_address": ""}
   ]
 }
 
@@ -39,6 +39,8 @@ Rules:
   - UTILITY_PROPERTY: utility bills, property tax, tenancy agreements, SP services
   - GENERAL: general business correspondence, invoices, receipts not covered above
   - UNKNOWN: cannot determine the document type
+- sender_name: the organisation or authority that issued/sent the document (e.g. "Inland Revenue Authority of Singapore", "DBS Bank", "Drew & Napier LLC"). Use "Null" if not found.
+- sender_address: the sender's address as printed on the document. Use "Null" if not found.
 
 Confidence scoring (integer 0-100):
 - confidence (per item): how certain you are about the extracted fields for that specific document split — consider name clarity, UEN presence, page boundary sharpness, and text quality for those pages
@@ -51,6 +53,8 @@ export type OcrClientExtractRow = {
   page_range: string;
   classification: ClassificationLabel;
   confidence: number;
+  sender_name: string;
+  sender_address: string;
 };
 
 export type OcrClientExtractResult = {
@@ -114,7 +118,11 @@ export function normalizeOcrClientExtractResult(
       ? (rawClassification as ClassificationLabel)
       : "UNKNOWN";
     const confidence = clampConfidence(r.confidence ?? 50);
-    items.push({ name, UEN, document_type, page_range, classification, confidence });
+    let sender_name = r.sender_name != null ? String(r.sender_name).trim() : "Null";
+    if (!sender_name || sender_name.toLowerCase() === "null") sender_name = "Null";
+    let sender_address = r.sender_address != null ? String(r.sender_address).trim() : "Null";
+    if (!sender_address || sender_address.toLowerCase() === "null") sender_address = "Null";
+    items.push({ name, UEN, document_type, page_range, classification, confidence, sender_name, sender_address });
   }
 
   return { overall_confidence, items };

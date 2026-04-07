@@ -27,6 +27,8 @@ type OcrSplitItem = {
   odoo_resolution_method: string | null;
   odoo_accounting_manager_email: string | null;
   odoo_accounting_manager_name: string | null;
+  sender_name: string | null;
+  sender_address: string | null;
 };
 
 type ReviewDoc = {
@@ -532,6 +534,18 @@ export default function ReviewDetailPage() {
                 <dd className={`font-medium ${confColor(item.confidence)}`}>{Math.round(item.confidence)}%</dd>
                 <dt className="text-zinc-500">Type</dt>
                 <dd className="text-zinc-200">{item.document_type || item.classification || "—"}</dd>
+                {item.sender_name && (
+                  <>
+                    <dt className="text-zinc-500">Sender</dt>
+                    <dd className="text-zinc-200">{item.sender_name}</dd>
+                  </>
+                )}
+                {item.sender_address && (
+                  <>
+                    <dt className="text-zinc-500">Sender Address</dt>
+                    <dd className="text-zinc-200 text-xs">{item.sender_address}</dd>
+                  </>
+                )}
                 {item.pdfError && (
                   <>
                     <dt className="text-zinc-500">PDF Error</dt>

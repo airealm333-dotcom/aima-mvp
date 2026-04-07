@@ -34,6 +34,8 @@ export type OcrClientsPipelineItemInternal = {
   odoo_resolution_method: string | null;
   odoo_accounting_manager_email: string | null;
   odoo_accounting_manager_name: string | null;
+  sender_name: string | null;
+  sender_address: string | null;
 };
 
 export type OcrClientsPipelineResult = {
@@ -71,6 +73,8 @@ export async function runOcrClientsPipelineOnPdfBuffer(
         odoo_resolution_method: null as string | null,
         odoo_accounting_manager_email: null as string | null,
         odoo_accounting_manager_name: null as string | null,
+        sender_name: row.sender_name === "Null" ? null : (row.sender_name || null),
+        sender_address: row.sender_address === "Null" ? null : (row.sender_address || null),
       };
 
       if (!pr) {
