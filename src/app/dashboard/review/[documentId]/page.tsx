@@ -24,11 +24,13 @@ type OcrSplitItem = {
   odoo_match_score: number | null;
   odoo_match_method: string | null;
   odoo_contact_email: string | null;
+  odoo_contact_name: string | null;
   odoo_resolution_method: string | null;
   odoo_accounting_manager_email: string | null;
   odoo_accounting_manager_name: string | null;
   sender_name: string | null;
   sender_address: string | null;
+  document_date: string | null;
 };
 
 type ReviewDoc = {
@@ -546,6 +548,12 @@ export default function ReviewDetailPage() {
                     <dd className="text-zinc-200 text-xs">{item.sender_address}</dd>
                   </>
                 )}
+                {item.document_date && (
+                  <>
+                    <dt className="text-zinc-500">Document Date</dt>
+                    <dd className="text-zinc-200">{item.document_date}</dd>
+                  </>
+                )}
                 {item.pdfError && (
                   <>
                     <dt className="text-zinc-500">PDF Error</dt>
@@ -663,6 +671,11 @@ export default function ReviewDetailPage() {
             {/* Contact email */}
             <section>
               <h3 className="mb-2 text-sm font-semibold text-zinc-300">Contact Email</h3>
+              {item.odoo_contact_name && (
+                <p className="mb-1 text-xs text-zinc-400">
+                  {item.odoo_contact_name}
+                </p>
+              )}
               {item.odoo_resolution_method && (
                 <p className="mb-1 text-xs text-zinc-500">
                   Resolved via: <span className="text-zinc-400">{item.odoo_resolution_method}</span>

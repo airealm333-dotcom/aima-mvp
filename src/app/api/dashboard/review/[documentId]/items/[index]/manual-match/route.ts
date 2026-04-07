@@ -45,6 +45,7 @@ export async function POST(
   // Run contact resolution for the chosen partner
   const cfg = loadOdooMatchConfigFromEnv();
   let contactEmail: string | null = null;
+  let contactName: string | null = null;
   let resolutionMethod: string | null = null;
   let accountingManagerEmail: string | null = null;
   let accountingManagerName: string | null = null;
@@ -65,6 +66,7 @@ export async function POST(
       if (d4.resolutionMethod !== "not_found" && d4.email) {
         contactEmail = d4.email;
         resolutionMethod = d4.resolutionMethod;
+        contactName = d4.contactName;
       }
       accountingManagerEmail = d4.accountingManagerEmail;
       accountingManagerName = d4.accountingManagerName;
@@ -83,6 +85,7 @@ export async function POST(
     odoo_match_score: 100,
     odoo_match_method: "manual",
     odoo_contact_email: contactEmail,
+    odoo_contact_name: contactName,
     odoo_resolution_method: resolutionMethod ?? "manual",
     odoo_accounting_manager_email: accountingManagerEmail,
     odoo_accounting_manager_name: accountingManagerName,

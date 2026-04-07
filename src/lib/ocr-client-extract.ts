@@ -21,7 +21,7 @@ The object must follow this exact structure:
 {
   "overall_confidence": 0,
   "items": [
-    {"name": "", "UEN": "", "document_type": "", "page_range": "", "classification": "", "confidence": 0, "sender_name": "", "sender_address": ""}
+    {"name": "", "UEN": "", "document_type": "", "page_range": "", "classification": "", "confidence": 0, "sender_name": "", "sender_address": "", "document_date": ""}
   ]
 }
 
@@ -41,6 +41,7 @@ Rules:
   - UNKNOWN: cannot determine the document type
 - sender_name: the organisation or authority that issued/sent the document (e.g. "Inland Revenue Authority of Singapore", "DBS Bank", "Drew & Napier LLC"). Use "Null" if not found.
 - sender_address: the sender's address as printed on the document. Use "Null" if not found.
+- document_date: the date printed on the document (e.g. issue date, statement date, receipt date). Use ISO format YYYY-MM-DD if possible, otherwise use the date as printed. Use "Null" if not found.
 
 Confidence scoring (integer 0-100):
 - confidence (per item): how certain you are about the extracted fields for that specific document split — consider name clarity, UEN presence, page boundary sharpness, and text quality for those pages
@@ -55,6 +56,7 @@ export type OcrClientExtractRow = {
   confidence: number;
   sender_name: string;
   sender_address: string;
+  document_date: string;
 };
 
 export type OcrClientExtractResult = {
@@ -122,7 +124,9 @@ export function normalizeOcrClientExtractResult(
     if (!sender_name || sender_name.toLowerCase() === "null") sender_name = "Null";
     let sender_address = r.sender_address != null ? String(r.sender_address).trim() : "Null";
     if (!sender_address || sender_address.toLowerCase() === "null") sender_address = "Null";
-    items.push({ name, UEN, document_type, page_range, classification, confidence, sender_name, sender_address });
+    let document_date = r.document_date != null ? String(r.document_date).trim() : "Null";
+    if (!document_date || document_date.toLowerCase() === "null") document_date = "Null";
+    items.push({ name, UEN, document_type, page_range, classification, confidence, sender_name, sender_address, document_date });
   }
 
   return { overall_confidence, items };

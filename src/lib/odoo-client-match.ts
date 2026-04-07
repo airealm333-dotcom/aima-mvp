@@ -46,6 +46,7 @@ export type OdooClientMatchResult = {
 
 export type OdooResolvedContact = {
   contactId: number | null;
+  contactName: string | null;
   email: string;
   resolutionMethod:
     | "primary_contact"
@@ -483,7 +484,7 @@ export async function resolveOdooRecipientContact(input: {
   const parentRows = await input.client.searchReadPartners(
     input.uid,
     [["id", "=", input.partnerId]],
-    ["id", "email", "user_id", "child_ids"],
+    ["id", "name", "email", "user_id", "child_ids"],
     1,
   );
   const parent = parentRows[0];
@@ -551,6 +552,7 @@ export async function resolveOdooRecipientContact(input: {
     console.log(`[D4] partnerId=${input.partnerId} → primary_contact "${primary.name}" <${primary.email}>`);
     return {
       contactId: primary.id,
+      contactName: primary.name ?? null,
       email: primary.email,
       resolutionMethod: "primary_contact",
       accountingManagerEmail,
@@ -564,6 +566,7 @@ export async function resolveOdooRecipientContact(input: {
     console.log(`[D4] partnerId=${input.partnerId} → secondary_contact "${secondary.name}" <${secondary.email}>`);
     return {
       contactId: secondary.id,
+      contactName: secondary.name ?? null,
       email: secondary.email,
       resolutionMethod: "secondary_contact",
       accountingManagerEmail,
@@ -571,13 +574,15 @@ export async function resolveOdooRecipientContact(input: {
     };
   }
 
-  // 3) Company email fallback
+  // 3) Company email fallback — use company name as contact name
   const companyEmail = normalizeEmail(parent?.email);
   if (parent && companyEmail) {
     const id = typeof parent.id === "number" ? parent.id : Number(parent.id);
+    const companyName = typeof parent.name === "string" ? parent.name : null;
     console.log(`[D4] partnerId=${input.partnerId} → company_email <${companyEmail}>`);
     return {
       contactId: Number.isFinite(id) ? id : null,
+      contactName: companyName,
       email: companyEmail,
       resolutionMethod: "company_email",
       accountingManagerEmail,
@@ -588,6 +593,7 @@ export async function resolveOdooRecipientContact(input: {
   console.log(`[D4] partnerId=${input.partnerId} → not_found`);
   return {
     contactId: null,
+    contactName: null,
     email: "",
     resolutionMethod: "not_found",
     accountingManagerEmail,
