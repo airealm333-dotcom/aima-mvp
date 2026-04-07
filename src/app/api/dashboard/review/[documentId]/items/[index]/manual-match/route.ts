@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { scheduleDispatchAfterReviewCleared } from "@/lib/ocr-clients-auto-dispatch";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import {
   authenticateOdooForMatch,
@@ -93,6 +94,8 @@ export async function POST(
     .eq("id", documentId);
 
   if (updateErr) return NextResponse.json({ error: updateErr.message }, { status: 500 });
+
+  scheduleDispatchAfterReviewCleared(supabase, documentId, itemIndex);
 
   return NextResponse.json({ item: items[itemIndex] });
 }

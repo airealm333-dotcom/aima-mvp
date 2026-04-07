@@ -32,6 +32,7 @@ type StoredOcrItem = {
   odoo_resolution_method: string | null;
   odoo_accounting_manager_email: string | null;
   odoo_accounting_manager_name: string | null;
+  dispatched_at: string | null;
 };
 
 export type OcrClientsDocResult = {
@@ -88,6 +89,22 @@ export async function runOcrClientsForDocument(
     const { ocr, overall_confidence, items } =
       await runOcrClientsPipelineOnPdfBuffer(buffer);
 
+    // Preserve dispatched_at from any previous run so re-processing doesn't
+    // clear the stamp and cause duplicate emails.
+    const { data: existingDoc } = await supabase.client
+      .from("documents")
+      .select("ocr_clients_items")
+      .eq("id", documentId)
+      .maybeSingle();
+    const existingItems: StoredOcrItem[] = Array.isArray(
+      (existingDoc as { ocr_clients_items?: unknown } | null)?.ocr_clients_items,
+    )
+      ? ((existingDoc as unknown as { ocr_clients_items: StoredOcrItem[] }).ocr_clients_items)
+      : [];
+    const existingDispatchedAt = new Map(
+      existingItems.map((it) => [it.index, it.dispatched_at ?? null]),
+    );
+
     const storedItems: StoredOcrItem[] = [];
 
     for (const it of items) {
@@ -129,6 +146,7 @@ export async function runOcrClientsForDocument(
         odoo_resolution_method: it.odoo_resolution_method,
         odoo_accounting_manager_email: it.odoo_accounting_manager_email,
         odoo_accounting_manager_name: it.odoo_accounting_manager_name,
+        dispatched_at: existingDispatchedAt.get(it.index) ?? null,
       });
     }
 
@@ -157,6 +175,9 @@ export async function runOcrClientsForDocument(
       actor: "AIMA",
       metadata: { drid: row.drid, itemCount: storedItems.length },
     } as never);
+
+    // Dispatch is handled by the cron job (/api/cron/dispatch-pending).
+    // No in-process setTimeout here — avoids races with the cron.
 
     return {
       ocr: {

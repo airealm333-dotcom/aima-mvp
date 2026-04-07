@@ -130,11 +130,6 @@ export default function ReviewDetailPage() {
   const [matchError, setMatchError] = useState<string | null>(null);
   const [matchSuccess, setMatchSuccess] = useState(false);
 
-  // Dispatch
-  const [dispatching, setDispatching] = useState(false);
-  const [dispatchResult, setDispatchResult] = useState<{ sent: number; errorCount: number } | null>(null);
-  const [dispatchError, setDispatchError] = useState<string | null>(null);
-
   // Matched partner name (fetched from Odoo when item has a partner_id)
   const [matchedPartnerName, setMatchedPartnerName] = useState<string | null>(null);
   // All partner names for the item list sidebar
@@ -343,36 +338,6 @@ export default function ReviewDetailPage() {
     }
   }, [currentItem, contactEmail, documentId, doc]);
 
-  // ── Dispatch ──
-  const handleDispatch = useCallback(async (indices?: number[]) => {
-    setDispatching(true);
-    setDispatchResult(null);
-    setDispatchError(null);
-    try {
-      const res = await fetch(`/api/dashboard/review/${documentId}/dispatch`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(indices ? { indices } : {}),
-      });
-      const text = await res.text();
-      let d: { sent?: number; errorCount?: number; error?: string };
-      try {
-        d = JSON.parse(text);
-      } catch {
-        setDispatchError(`Server error (${res.status}) — check console`);
-        console.error("[dispatch] Non-JSON response:", text.slice(0, 500));
-        return;
-      }
-      if (d.error) { setDispatchError(d.error); return; }
-      setDispatchResult({ sent: d.sent ?? 0, errorCount: d.errorCount ?? 0 });
-      setTimeout(() => setDispatchResult(null), 6000);
-    } catch (e) {
-      setDispatchError(String(e));
-    } finally {
-      setDispatching(false);
-    }
-  }, [documentId]);
-
   // ─── Render ───────────────────────────────────────────────────────────────
 
   const allDocCount = needsReviewDocs.length + processedDocs.length;
@@ -473,25 +438,6 @@ export default function ReviewDetailPage() {
               ✓ All items processed
             </span>
           )}
-
-          {/* Dispatch all */}
-          <div className="flex items-center gap-2">
-            {dispatchResult && (
-              <span className={`text-xs ${dispatchResult.errorCount > 0 ? "text-yellow-400" : "text-green-400"}`}>
-                ✓ {dispatchResult.sent} sent{dispatchResult.errorCount > 0 ? `, ${dispatchResult.errorCount} failed` : ""}
-              </span>
-            )}
-            {dispatchError && (
-              <span className="max-w-[200px] truncate text-xs text-red-400" title={dispatchError}>{dispatchError}</span>
-            )}
-            <button
-              onClick={() => handleDispatch()}
-              disabled={dispatching || allItems.length === 0}
-              className="flex items-center gap-1.5 rounded bg-blue-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-600 disabled:opacity-50"
-            >
-              {dispatching ? "Sending…" : `Send all (${allItems.length})`}
-            </button>
-          </div>
         </div>
       </header>
 
@@ -732,28 +678,6 @@ export default function ReviewDetailPage() {
                     {item.odoo_accounting_manager_email}
                   </span>
                 </p>
-              )}
-            </section>
-
-            <hr className="border-zinc-800" />
-
-            {/* Dispatch this item */}
-            <section>
-              <h3 className="mb-2 text-sm font-semibold text-zinc-300">Dispatch</h3>
-              <button
-                onClick={() => handleDispatch([item.index])}
-                disabled={dispatching}
-                className="w-full rounded bg-blue-700 px-3 py-2 text-xs font-medium text-white hover:bg-blue-600 disabled:opacity-50"
-              >
-                {dispatching ? "Sending…" : "Send this item →"}
-              </button>
-              {dispatchResult && (
-                <p className={`mt-1.5 text-xs ${dispatchResult.errorCount > 0 ? "text-yellow-400" : "text-green-400"}`}>
-                  ✓ {dispatchResult.sent} sent{dispatchResult.errorCount > 0 ? `, ${dispatchResult.errorCount} failed` : ""}
-                </p>
-              )}
-              {dispatchError && (
-                <p className="mt-1.5 text-xs text-red-400">{dispatchError}</p>
               )}
             </section>
 

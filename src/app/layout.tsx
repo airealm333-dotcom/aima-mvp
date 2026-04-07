@@ -29,14 +29,11 @@ export default function RootLayout({
     >
       <body className="flex min-h-full flex-col">
         <nav className="flex flex-wrap gap-4 border-b border-zinc-200 px-4 py-2 text-sm dark:border-zinc-800">
-          <a className="underline" href="/">
-            Intake
-          </a>
           <a className="underline" href="/dashboard">
             Dashboard
           </a>
-          <a className="underline" href="/ocr-clients">
-            OCR → clients
+          <a className="underline" href="/dashboard/settings">
+            Settings
           </a>
         </nav>
         {children}

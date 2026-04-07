@@ -1,22 +1,8 @@
 import { NextResponse } from "next/server";
+import { countOcrClientItemsNeedingReview } from "@/lib/ocr-clients-review";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 
 export const runtime = "nodejs";
-
-const CONFIDENCE_THRESHOLD = 70;
-
-function countReviewItems(items: Record<string, unknown>[]): number {
-  return items.filter((item) => {
-    const conf = item.confidence as number | null;
-    if (conf != null && conf < CONFIDENCE_THRESHOLD) return true;
-    if (item.odoo_match_status === "no_match") return true;
-    if (item.odoo_match_status === "ambiguous") return true;
-    if (item.odoo_match_status === "matched" && !item.odoo_contact_email) return true;
-    if (item.UEN === "Null" && item.odoo_match_status !== "matched") return true;
-    if (item.pdfError) return true;
-    return false;
-  }).length;
-}
 
 export async function GET() {
   const supabase = getSupabaseAdmin();
@@ -40,7 +26,7 @@ export async function GET() {
       drid: doc.drid as string,
       created_at: doc.created_at as string,
       totalItems: items.length,
-      reviewCount: countReviewItems(items),
+      reviewCount: countOcrClientItemsNeedingReview(items),
     };
   });
 

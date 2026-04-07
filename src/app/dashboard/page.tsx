@@ -435,7 +435,7 @@ function ProcessedDocCard({
 function ReviewCard({ flat }: { flat: FlatClientItem }) {
   const { item, drid, docId, reviewReasons: reasons } = flat;
   return (
-    <Link href={`/dashboard/review/${docId}`} className="block">
+    <Link href={`/dashboard/review/${docId}?item=${item.index}`} className="block">
       <article className="cursor-pointer rounded-lg border border-amber-200 bg-white p-3 shadow-sm transition-colors hover:border-amber-400 hover:bg-amber-50 dark:border-amber-900/50 dark:bg-zinc-900 dark:hover:border-amber-600 dark:hover:bg-zinc-800">
         <div className="mb-1 flex items-start gap-2">
           <span className="min-w-0 flex-1 truncate text-sm font-medium">
@@ -610,21 +610,7 @@ export default function DashboardPage() {
       {/* ── Header ── */}
       <header className="flex shrink-0 flex-wrap items-center gap-4 border-b border-zinc-200 bg-white px-6 py-4 dark:border-zinc-800 dark:bg-zinc-900">
         <div>
-          <div className="flex items-center gap-3">
-            <Link
-              href="/"
-              className="text-xs text-zinc-500 underline dark:text-zinc-400"
-            >
-              ← Intake
-            </Link>
-            <Link
-              href="/ocr-clients"
-              className="text-xs text-zinc-500 underline dark:text-zinc-400"
-            >
-              OCR→Clients tool
-            </Link>
-          </div>
-          <h1 className="mt-1 text-xl font-bold">AIMA Dashboard</h1>
+          <h1 className="mt-1 text-xl font-bold">Dashboard</h1>
         </div>
 
         {data ? (
@@ -636,7 +622,6 @@ export default function DashboardPage() {
               warn
             />
             <Stat label="Processed" value={data.processed.length} />
-            <Stat label="Clients" value={allClientItems.length} />
             <Stat label="Needs Review" value={reviewCount} warn />
           </div>
         ) : null}

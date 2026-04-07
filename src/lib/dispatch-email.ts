@@ -28,6 +28,7 @@ export type DispatchItem = {
   odoo_resolution_method: string | null;
   odoo_accounting_manager_name: string | null;
   odoo_accounting_manager_email: string | null;
+  dispatched_at: string | null;
 };
 
 export type DispatchResult = {
@@ -137,11 +138,104 @@ function buildRawEmail(opts: {
   return raw;
 }
 
+async function loadDispatchItems(
+  supabase: SupabaseAdminBundle,
+  documentId: string,
+): Promise<{ drid: string; items: DispatchItem[] }> {
+  const { data, error } = await supabase.client
+    .from("documents")
+    .select("drid, ocr_clients_items")
+    .eq("id", documentId)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(`dispatch load failed: ${error.message}`);
+  }
+  if (!data) {
+    throw new Error("dispatch load failed: document not found");
+  }
+
+  const row = data as { drid: string; ocr_clients_items: unknown };
+  const items = Array.isArray(row.ocr_clients_items)
+    ? (row.ocr_clients_items as DispatchItem[])
+    : [];
+
+  return { drid: row.drid, items };
+}
+
+/** Re-read one item by index from DB (avoids stale snapshots and races). */
+async function loadItemByIndex(
+  supabase: SupabaseAdminBundle,
+  documentId: string,
+  index: number,
+): Promise<DispatchItem | null> {
+  const { items } = await loadDispatchItems(supabase, documentId);
+  return items.find((it) => it.index === index) ?? null;
+}
+
+const STAMP_UPDATE_RETRIES = 4;
+
+async function stampDispatchedAt(
+  supabase: SupabaseAdminBundle,
+  documentId: string,
+  itemIndex: number,
+  sentAt: string,
+): Promise<boolean> {
+  for (let attempt = 0; attempt < STAMP_UPDATE_RETRIES; attempt++) {
+    const { data: fresh, error: readErr } = await supabase.client
+      .from("documents")
+      .select("ocr_clients_items")
+      .eq("id", documentId)
+      .maybeSingle();
+
+    if (readErr || !fresh) {
+      console.error(
+        `[dispatch] stamp read failed (attempt ${attempt + 1}):`,
+        readErr?.message ?? "no row",
+      );
+      continue;
+    }
+
+    const allItems =
+      (fresh as { ocr_clients_items: DispatchItem[] }).ocr_clients_items ?? [];
+    const current = allItems.find((it) => it.index === itemIndex);
+    if (current?.dispatched_at) {
+      return true;
+    }
+
+    const updated = allItems.map((it) =>
+      it.index === itemIndex && !it.dispatched_at
+        ? { ...it, dispatched_at: sentAt }
+        : it,
+    );
+
+    const { error: writeErr } = await supabase.client
+      .from("documents")
+      .update({ ocr_clients_items: updated } as never)
+      .eq("id", documentId);
+
+    if (!writeErr) {
+      return true;
+    }
+    console.error(
+      `[dispatch] stamp write failed (attempt ${attempt + 1}):`,
+      writeErr.message,
+    );
+  }
+  return false;
+}
+
+/**
+ * Sends one email per matching ocr_clients_items row. Always loads the latest
+ * items from the DB (the `items` argument is ignored) so pipeline timers and
+ * concurrent requests cannot use stale `dispatched_at`. Re-checks the row
+ * immediately before each Gmail send.
+ */
 export async function dispatchDocumentItems(
   supabase: SupabaseAdminBundle,
   documentId: string,
   drid: string,
-  items: DispatchItem[],
+  _itemsFromCallerIgnored: DispatchItem[],
   indices?: number[], // if given, only dispatch these item indices
 ): Promise<DispatchResult[]> {
   const toEmail = (process.env.DISPATCH_TO_EMAIL ?? "").trim();
@@ -158,24 +252,50 @@ export async function dispatchDocumentItems(
   const fromEmail = profile.data.emailAddress ?? userId;
   const from = `${fromName} <${fromEmail}>`;
 
-  const targetItems = indices
-    ? items.filter((it) => indices.includes(it.index))
-    : items;
+  const { drid: dbDrid, items: freshItems } = await loadDispatchItems(
+    supabase,
+    documentId,
+  );
+  const effectiveDrid = dbDrid || drid;
+
+  const targetItems =
+    indices !== undefined
+      ? freshItems.filter((it) => indices.includes(it.index))
+      : freshItems;
 
   const results: DispatchResult[] = [];
 
   for (const item of targetItems) {
+    if (item.dispatched_at) {
+      results.push({ index: item.index, name: item.name, status: "skipped" });
+      continue;
+    }
+
     try {
-      // Download split PDF if available
+      const live = await loadItemByIndex(supabase, documentId, item.index);
+      if (!live) {
+        results.push({
+          index: item.index,
+          name: item.name,
+          status: "error",
+          error: "Item missing on pre-send read",
+        });
+        continue;
+      }
+      if (live.dispatched_at) {
+        results.push({ index: item.index, name: item.name, status: "skipped" });
+        continue;
+      }
+
       let attachment: { filename: string; data: Buffer; mimeType: string } | undefined;
 
-      if (item.split_path) {
+      if (live.split_path) {
         const dl = await supabase.client.storage
           .from(supabase.storageBucket)
-          .download(item.split_path);
+          .download(live.split_path);
 
         if (!dl.error && dl.data) {
-          const filename = `${drid}-${(item.name || `item${item.index}`).replace(/[^a-zA-Z0-9_.-]/g, "_")}.pdf`;
+          const filename = `${effectiveDrid}-${(live.name || `item${live.index}`).replace(/[^a-zA-Z0-9_.-]/g, "_")}.pdf`;
           attachment = {
             filename,
             data: Buffer.from(await dl.data.arrayBuffer()),
@@ -184,8 +304,8 @@ export async function dispatchDocumentItems(
         }
       }
 
-      const subject = `[AIMA] ${item.name || `Item ${item.index + 1}`} — ${drid}`;
-      const htmlBody = buildEmailBody(item, drid);
+      const subject = `[AIMA] ${live.name || `Item ${live.index + 1}`} — ${effectiveDrid}`;
+      const htmlBody = buildEmailBody(live, effectiveDrid);
       const rawEmail = buildRawEmail({ from, to: toEmail, subject, htmlBody, attachment });
 
       await gmail.users.messages.send({
@@ -193,7 +313,15 @@ export async function dispatchDocumentItems(
         requestBody: { raw: encodeMessage(rawEmail) },
       });
 
-      results.push({ index: item.index, name: item.name, status: "sent" });
+      const sentAt = new Date().toISOString();
+      const stamped = await stampDispatchedAt(supabase, documentId, live.index, sentAt);
+      if (!stamped) {
+        console.error(
+          `[dispatch] ${effectiveDrid} item ${live.index}: Gmail sent but dispatched_at stamp failed after retries`,
+        );
+      }
+
+      results.push({ index: live.index, name: live.name, status: "sent" });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       results.push({ index: item.index, name: item.name, status: "error", error: msg });
