@@ -35,6 +35,8 @@ type StoredOcrItem = {
   dispatched_at: string | null;
   sender_name: string | null;
   sender_address: string | null;
+  odoo_contact_name: string | null;
+  document_date: string | null;
 };
 
 export type OcrClientsDocResult = {
@@ -151,6 +153,8 @@ export async function runOcrClientsForDocument(
         dispatched_at: existingDispatchedAt.get(it.index) ?? null,
         sender_name: it.sender_name === "Null" ? null : (it.sender_name || null),
         sender_address: it.sender_address === "Null" ? null : (it.sender_address || null),
+        odoo_contact_name: it.odoo_contact_name ?? null,
+        document_date: it.document_date === "Null" ? null : (it.document_date || null),
       });
     }
 

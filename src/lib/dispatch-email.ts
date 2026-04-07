@@ -31,6 +31,8 @@ export type DispatchItem = {
   dispatched_at: string | null;
   sender_name: string | null;
   sender_address: string | null;
+  odoo_contact_name: string | null;
+  document_date: string | null;
 };
 
 export type DispatchResult = {
@@ -40,42 +42,39 @@ export type DispatchResult = {
   error?: string;
 };
 
-function buildEmailBody(item: DispatchItem, drid: string): string {
-  const line = (label: string, value: string | number | null | undefined) =>
-    `<tr><td style="padding:4px 12px 4px 0;color:#6b7280;white-space:nowrap;vertical-align:top;">${label}</td><td style="padding:4px 0;color:#111827;">${value ?? "—"}</td></tr>`;
+function buildEmailBody(item: DispatchItem): string {
+  const clientName = item.name || "—";
+  const senderLine = [item.sender_name, item.sender_address].filter(Boolean).join(", ") || "—";
+  const accountManagerLine = [item.odoo_accounting_manager_name, item.odoo_accounting_manager_email].filter(Boolean).join(", ") || "—";
 
-  return `
-<!DOCTYPE html>
+  return `<!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"></head>
-<body style="font-family:Arial,sans-serif;font-size:14px;color:#111827;margin:0;padding:24px;">
-  <h2 style="margin:0 0 4px;font-size:18px;">${item.name || "—"}</h2>
-  <p style="margin:0 0 20px;color:#6b7280;font-size:12px;">Document: ${drid} &nbsp;·&nbsp; Pages: ${item.page_range}</p>
+<body style="font-family:Arial,sans-serif;font-size:14px;color:#111827;margin:0;padding:32px;max-width:640px;">
 
-  <table style="border-collapse:collapse;width:100%;max-width:560px;">
-    ${line("Client Name", item.name)}
-    ${line("UEN", item.UEN === "Null" ? "—" : item.UEN)}
-    ${line("Document Type", item.document_type || item.classification)}
-    ${line("Sender", item.sender_name)}
-    ${line("Sender Address", item.sender_address)}
-    ${line("Pages", item.page_range)}
-    ${line("Confidence", item.confidence != null ? `${Math.round(item.confidence)}%` : null)}
-    <tr><td colspan="2" style="padding:8px 0;"><hr style="border:none;border-top:1px solid #e5e7eb;"></td></tr>
-    ${line("Client Email", item.odoo_contact_email)}
-    ${line("Contact Resolution", item.odoo_resolution_method)}
-    <tr><td colspan="2" style="padding:8px 0;"><hr style="border:none;border-top:1px solid #e5e7eb;"></td></tr>
-    ${line("Accounting Manager", item.odoo_accounting_manager_name)}
-    ${line("Accounting Manager Email", item.odoo_accounting_manager_email)}
-    <tr><td colspan="2" style="padding:8px 0;"><hr style="border:none;border-top:1px solid #e5e7eb;"></td></tr>
-    ${line("Odoo Partner ID", item.odoo_partner_id)}
-    ${line("Odoo Match Status", item.odoo_match_status)}
-    ${line("Odoo Match Method", item.odoo_match_method)}
-    ${line("Odoo Match Score", item.odoo_match_score != null ? String(item.odoo_match_score) : null)}
-  </table>
+  <p style="margin:0 0 4px;"><strong>Account Manager:</strong> ${accountManagerLine}</p>
+  <p style="margin:0 0 20px;"><strong>Client Email Id:</strong> ${item.odoo_contact_email ?? "—"}</p>
 
-  <p style="margin:24px 0 0;font-size:11px;color:#9ca3af;">
-    Sent by AIMA · ${new Date().toUTCString()}
-  </p>
+  <p style="margin:0 0 20px;">Dear ${item.odoo_contact_name || clientName},</p>
+
+  <p style="margin:0 0 20px;line-height:1.6;">We have received physical correspondence addressed to your entity, details of which are set out below for your review and necessary action.</p>
+
+  <p style="margin:0 0 8px;"><strong>Mail Details:</strong></p>
+  <ul style="margin:0 0 20px;padding-left:20px;line-height:2;">
+    <li><strong>Date of Receipt:</strong> ${item.document_date ?? "—"}</li>
+    <li><strong>Sender:</strong> ${senderLine}</li>
+    <li><strong>Addressee (as per envelope):</strong> ${clientName}</li>
+    <li><strong>Summary of Contents:</strong> ${item.document_type || item.classification || "—"}</li>
+  </ul>
+
+  <p style="margin:0 0 8px;"><strong>Attachments:</strong></p>
+  <p style="margin:0 0 20px;line-height:1.6;">Please find attached scanned copies of the original documents for your reference.</p>
+
+  <p style="margin:0 0 8px;"><strong>Remarks:</strong></p>
+  <p style="margin:0 0 20px;line-height:1.6;">If any specific handling instructions are required (e.g., filing, drafting responses, regulatory submissions), please let us know.</p>
+
+  <p style="margin:0 0 0;line-height:1.6;">Kindly review the attached documents and advise us on the next steps.</p>
+
 </body>
 </html>`.trim();
 }
@@ -308,8 +307,8 @@ export async function dispatchDocumentItems(
         }
       }
 
-      const subject = `[AIMA] ${live.name || `Item ${live.index + 1}`} — ${effectiveDrid}`;
-      const htmlBody = buildEmailBody(live, effectiveDrid);
+      const subject = `Incoming Mail Received`;
+      const htmlBody = buildEmailBody(live);
       const rawEmail = buildRawEmail({ from, to: toEmail, subject, htmlBody, attachment });
 
       await gmail.users.messages.send({

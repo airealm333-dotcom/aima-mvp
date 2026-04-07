@@ -128,7 +128,6 @@ export async function syncGmailUnprocessedToQueue(
   supabase: SupabaseAdminBundle,
   gmail: GmailIntakeClient,
   userId: string,
-  unprocessedLabelId: string,
 ): Promise<{ upserted: number; listedCount: number; errors: string[] }> {
   const errors: string[] = [];
   const syncMaxRaw = process.env.GMAIL_QUEUE_SYNC_MAX_MESSAGES;
@@ -137,7 +136,8 @@ export async function syncGmailUnprocessedToQueue(
 
   const list = await gmail.users.messages.list({
     userId,
-    labelIds: [unprocessedLabelId],
+    labelIds: ["INBOX"],
+    q: "has:attachment",
     maxResults: limit,
   });
 
@@ -311,31 +311,14 @@ export async function runEmailIntakePoll(
   }
 
   const userId = process.env.GMAIL_INTAKE_USER_ID?.trim() || "me";
-  const unprocessedName =
-    process.env.GMAIL_INTAKE_LABEL_UNPROCESSED?.trim() || "Unprocessed";
   const processedName =
     process.env.GMAIL_INTAKE_LABEL_PROCESSED?.trim() || "Processed";
 
-  const unprocessedId = await getOrCreateLabelId(
-    gmail,
-    userId,
-    unprocessedName,
-  );
   const processedId = await getOrCreateLabelId(gmail, userId, processedName);
-
-  if (!unprocessedId) {
-    result.errors.push(`LABEL_MISSING_OR_CREATE_FAILED:${unprocessedName}`);
-    return result;
-  }
 
   await resetStaleProcessing(supabase);
 
-  const sync = await syncGmailUnprocessedToQueue(
-    supabase,
-    gmail,
-    userId,
-    unprocessedId,
-  );
+  const sync = await syncGmailUnprocessedToQueue(supabase, gmail, userId);
   result.errors.push(...sync.errors);
   result.scanned = sync.listedCount;
 
@@ -356,7 +339,6 @@ export async function runEmailIntakePoll(
     supabase,
     gmail,
     userId,
-    unprocessedId,
     processedId,
     row.gmail_message_id,
   );

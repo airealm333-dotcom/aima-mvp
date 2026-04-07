@@ -142,6 +142,10 @@ export function decideFromRankedScores(
   }
 
   if (band === "mid") {
+    // Single candidate in mid band is still a reasonable match
+    if (ranked.length === 1) {
+      return { kind: "matched", partnerId: top.id, score: top.score, method };
+    }
     return { kind: "ambiguous", topScore: top.score, method };
   }
 

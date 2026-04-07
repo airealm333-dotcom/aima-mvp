@@ -132,6 +132,36 @@ function partnerField(p: Record<string, unknown>, key: string): string | null {
   return str(v);
 }
 
+/**
+ * Child contacts (parent_id set) get resolved to their parent company ID.
+ * Deduplicates by resolved ID, keeping the highest score per company.
+ * This collapses e.g. "SHN BV" (child, score 86) into the parent
+ * "SHN Investments Pte. Ltd." so the match isn't split across two candidates.
+ */
+function resolveToParents(
+  rows: Record<string, unknown>[],
+  candidates: OdooPartnerCandidate[],
+): OdooPartnerCandidate[] {
+  const parentMap = new Map<number, number>();
+  for (const r of rows) {
+    const id = typeof r.id === "number" ? r.id : Number(r.id);
+    const raw = r.parent_id;
+    let parentId: number | null = null;
+    if (Array.isArray(raw) && typeof raw[0] === "number") parentId = raw[0];
+    else if (typeof raw === "number" && raw > 0) parentId = raw;
+    if (parentId) parentMap.set(id, parentId);
+  }
+  const merged = new Map<number, OdooPartnerCandidate>();
+  for (const c of candidates) {
+    const resolvedId = parentMap.get(c.id) ?? c.id;
+    const existing = merged.get(resolvedId);
+    if (!existing || c.score > existing.score) {
+      merged.set(resolvedId, { id: resolvedId, score: c.score, name: c.name });
+    }
+  }
+  return [...merged.values()].sort((a, b) => b.score - a.score);
+}
+
 function toResult(
   decision: TierDecision,
   rankedForAudit: OdooPartnerCandidate[],
@@ -201,7 +231,7 @@ export async function runOdooClientMatch(
 
   const { fieldUen, fieldLegal, fieldTrading, fuzzyCandidateLimit } = cfg;
 
-  const fields = ["id", "name", fieldUen, fieldLegal, fieldTrading].filter(
+  const fields = ["id", "name", fieldUen, fieldLegal, fieldTrading, "parent_id"].filter(
     (v, i, a) => a.indexOf(v) === i,
   );
 
@@ -293,44 +323,31 @@ export async function runOdooClientMatch(
         return false;
       });
 
-      if (exactHits.length === 1) {
-        const p = exactHits[0];
-        if (!p) {
-          throw new Error(
-            "Unexpected empty Odoo rows for exact normalized name match",
-          );
-        }
-        const id = typeof p.id === "number" ? p.id : Number(p.id);
-        return {
-          status: "matched",
-          partnerId: id,
-          score: 100,
-          method: "legal_exact",
-          candidates: [
-            {
-              id,
-              score: 100,
-              name: partnerField(p, "name") ?? `#${id}`,
-            },
-          ],
-        };
-      }
-
-      if (exactHits.length > 1) {
+      if (exactHits.length > 0) {
         const ranked: OdooPartnerCandidate[] = exactHits.map((p) => {
           const id = typeof p.id === "number" ? p.id : Number(p.id);
-          return {
-            id,
-            score: 100,
-            name: partnerField(p, "name") ?? `#${id}`,
-          };
+          return { id, score: 100, name: partnerField(p, "name") ?? `#${id}` };
         });
+        const resolved = resolveToParents(rows, ranked);
+        console.log(
+          `[odoo-match] tier2 exact hits (norms=[${uniqueNorms.join(",")}]) raw=${exactHits.length} resolved=${resolved.length}:`,
+          resolved.slice(0, 5).map((r) => `id=${r.id} name="${r.name}"`).join(" | "),
+        );
+        if (resolved.length === 1) {
+          return {
+            status: "matched",
+            partnerId: resolved[0]!.id,
+            score: 100,
+            method: "legal_exact",
+            candidates: resolved,
+          };
+        }
         return {
           status: "ambiguous",
           partnerId: null,
           score: 100,
           method: "legal_exact",
-          candidates: ranked.slice(0, 8),
+          candidates: resolved.slice(0, 8),
         };
       }
     }
@@ -411,12 +428,19 @@ export async function runOdooClientMatch(
 
   scored.sort((a, b) => b.score - a.score);
 
+  const resolved = resolveToParents(rows, scored);
+
+  console.log(
+    `[odoo-match] fuzzy candidates after resolve (needle="${needle}"):`,
+    resolved.slice(0, 5).map((r) => `id=${r.id} score=${r.score} name="${r.name}"`).join(" | "),
+  );
+
   const decision = decideFromRankedScores(
-    scored.map((s) => ({ id: s.id, score: s.score })),
+    resolved.map((s) => ({ id: s.id, score: s.score })),
     "fuzzy_name",
   );
 
-  return toResult(decision, scored);
+  return toResult(decision, resolved);
 }
 
 export async function authenticateOdooForMatch(

@@ -236,7 +236,6 @@ export async function processSingleGmailMessage(
   supabase: SupabaseAdminBundle,
   gmail: GmailIntakeClient,
   userId: string,
-  unprocessedId: string,
   processedId: string | null,
   messageId: string,
 ): Promise<SingleGmailIntakeResult> {
@@ -295,21 +294,16 @@ export async function processSingleGmailMessage(
     result.documentIds.push(docId);
     result.details.push({ messageId, item: itemLabel, outcome: "ok" });
 
-    // Move Gmail label
+    // Archive the email (remove from INBOX); optionally add a "Processed" label
     result.movedGmailLabel = true;
-    if (processedId) {
-      await gmail.users.messages.modify({
-        userId,
-        id: messageId,
-        requestBody: { removeLabelIds: [unprocessedId], addLabelIds: [processedId] },
-      });
-    } else {
-      await gmail.users.messages.modify({
-        userId,
-        id: messageId,
-        requestBody: { removeLabelIds: [unprocessedId] },
-      });
-    }
+    await gmail.users.messages.modify({
+      userId,
+      id: messageId,
+      requestBody: {
+        removeLabelIds: ["INBOX"],
+        ...(processedId ? { addLabelIds: [processedId] } : {}),
+      },
+    });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     result.errors.push(`${messageId}:${msg}`);
