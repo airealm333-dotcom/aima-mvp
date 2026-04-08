@@ -44,7 +44,7 @@ export type DispatchResult = {
 
 function buildEmailBody(item: DispatchItem): string {
   const clientName = item.name || "—";
-  const senderLine = [item.sender_name, item.sender_address].filter(Boolean).join(", ") || "—";
+  const senderLine = item.sender_name || "—";
   const accountManagerLine = [item.odoo_accounting_manager_name, item.odoo_accounting_manager_email].filter(Boolean).join(", ") || "—";
 
   return `<!DOCTYPE html>
