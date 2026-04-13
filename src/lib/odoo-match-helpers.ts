@@ -64,6 +64,26 @@ export function stringSimilarityPercent(a: string, b: string): number {
   return Math.round(100 * (1 - dist / maxLen));
 }
 
+/**
+ * Extract alternate forms of a name: full, contents inside parentheses (aliases),
+ * and the name with parentheses removed. Handles e.g.
+ * "Konexus Resources Pte. Ltd. (Conexus Resources Pte. Limited)" so that a query
+ * for "Conexus Resources" scores against the alias directly.
+ */
+function nameVariants(raw: string): string[] {
+  const seen = new Set<string>();
+  const push = (s: string | null) => {
+    if (s) seen.add(s);
+  };
+  push(normalizeOrgName(raw));
+  const parenMatches = raw.match(/\(([^)]+)\)/g);
+  if (parenMatches && parenMatches.length > 0) {
+    for (const m of parenMatches) push(normalizeOrgName(m.slice(1, -1)));
+    push(normalizeOrgName(raw.replace(/\([^)]*\)/g, " ")));
+  }
+  return [...seen];
+}
+
 /** Best score against several normalized targets. */
 export function bestNameScore(
   queryNorm: string,
@@ -71,10 +91,11 @@ export function bestNameScore(
 ): number {
   let best = 0;
   for (const c of candidates) {
-    const n = typeof c === "string" ? normalizeOrgName(c) : null;
-    if (!n) continue;
-    const s = stringSimilarityPercent(queryNorm, n);
-    if (s > best) best = s;
+    if (typeof c !== "string") continue;
+    for (const variant of nameVariants(c)) {
+      const s = stringSimilarityPercent(queryNorm, variant);
+      if (s > best) best = s;
+    }
   }
   return best;
 }

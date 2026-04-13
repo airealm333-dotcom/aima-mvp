@@ -229,6 +229,23 @@ export async function runOdooClientMatch(
     };
   }
 
+  // Strip trailing " - X" patterns (vessel/project/category suffixes added by LLM extraction).
+  // E.g. "SU-NAV MARINE - SUBARNAREKH" → "SU-NAV MARINE". Only splits on " - " (with spaces),
+  // so hyphenated words like "SU-NAV" are preserved.
+  const stripSuffix = (s: string | null): string | null => {
+    if (!s) return s;
+    const parts = s.split(/\s+-\s+/);
+    if (parts.length > 1 && parts[0] && parts[0].trim().length >= 3) {
+      return parts[0].trim();
+    }
+    return s;
+  };
+  inputs = {
+    ...inputs,
+    legalName: stripSuffix(inputs.legalName),
+    tradingName: stripSuffix(inputs.tradingName),
+  };
+
   const { fieldUen, fieldLegal, fieldTrading, fuzzyCandidateLimit } = cfg;
 
   const fields = ["id", "name", fieldUen, fieldLegal, fieldTrading, "parent_id"].filter(
@@ -365,33 +382,73 @@ export async function runOdooClientMatch(
     };
   }
 
-  let needle = pickFuzzyNeedle(primaryNorm);
-  if (!needle && tradingNorm) needle = pickFuzzyNeedle(tradingNorm);
-  if (!needle) {
-    return {
-      status: "no_match",
-      partnerId: null,
-      score: 0,
-      method: "fuzzy_name",
-      candidates: [],
-    };
+  // Collect all meaningful tokens (≥3 chars) from legal + trading names
+  const allTokens = [
+    ...(legalNorm ? legalNorm.split(/\s+/).filter((t) => t.length >= 3) : []),
+    ...(tradingNorm ? tradingNorm.split(/\s+/).filter((t) => t.length >= 3) : []),
+  ];
+  const uniqueTokens = [...new Set(allTokens)];
+
+  let rows: Record<string, unknown>[] = [];
+  let searchStrategy = "none";
+
+  // Strategy 1 — token-AND search: each token must appear in legal OR trading OR name
+  if (uniqueTokens.length > 0) {
+    const domainParts: unknown[] = [];
+    for (const token of uniqueTokens) {
+      const like = `%${token}%`;
+      domainParts.push(
+        "|",
+        "|",
+        [fieldLegal, "ilike", like],
+        [fieldTrading, "ilike", like],
+        ["name", "ilike", like],
+      );
+    }
+    try {
+      rows = await client.searchReadPartners(
+        uid,
+        domainParts,
+        fields,
+        fuzzyCandidateLimit,
+      );
+      if (rows.length > 0) searchStrategy = `token_and[${uniqueTokens.join(",")}]`;
+    } catch {
+      rows = [];
+    }
   }
 
-  const like = `%${needle}%`;
-  const fuzzyDomain: unknown[] = [
-    "|",
-    "|",
-    [fieldLegal, "ilike", like],
-    [fieldTrading, "ilike", like],
-    ["name", "ilike", like],
-  ];
+  // Strategy 2 — fall back to single longest-token needle
+  if (rows.length === 0) {
+    let needle = pickFuzzyNeedle(primaryNorm);
+    if (!needle && tradingNorm) needle = pickFuzzyNeedle(tradingNorm);
+    if (!needle) {
+      return {
+        status: "no_match",
+        partnerId: null,
+        score: 0,
+        method: "fuzzy_name",
+        candidates: [],
+      };
+    }
 
-  const rows = await client.searchReadPartners(
-    uid,
-    fuzzyDomain,
-    fields,
-    fuzzyCandidateLimit,
-  );
+    const like = `%${needle}%`;
+    const fuzzyDomain: unknown[] = [
+      "|",
+      "|",
+      [fieldLegal, "ilike", like],
+      [fieldTrading, "ilike", like],
+      ["name", "ilike", like],
+    ];
+
+    rows = await client.searchReadPartners(
+      uid,
+      fuzzyDomain,
+      fields,
+      fuzzyCandidateLimit,
+    );
+    searchStrategy = `needle[${needle}]`;
+  }
 
   const scored: OdooPartnerCandidate[] = rows.map((p) => {
     const id = typeof p.id === "number" ? p.id : Number(p.id);
@@ -431,7 +488,7 @@ export async function runOdooClientMatch(
   const resolved = resolveToParents(rows, scored);
 
   console.log(
-    `[odoo-match] fuzzy candidates after resolve (needle="${needle}"):`,
+    `[odoo-match] fuzzy candidates after resolve (strategy=${searchStrategy}, query="${primaryNorm}"):`,
     resolved.slice(0, 5).map((r) => `id=${r.id} score=${r.score} name="${r.name}"`).join(" | "),
   );
 
