@@ -252,9 +252,13 @@ export async function runOdooClientMatch(
     (v, i, a) => a.indexOf(v) === i,
   );
 
-  // Tier 1: UEN
+  // Tier 1: UEN — check custom field AND Odoo's Singapore localization field
   if (inputs.uen) {
-    const domain = [[fieldUen, "=", inputs.uen]];
+    const domain = [
+      "|",
+      [fieldUen, "=", inputs.uen],
+      ["l10n_sg_unique_entity_number", "=", inputs.uen],
+    ];
     const rows = await client.searchReadPartners(uid, domain, fields, 20);
     const ids = rows
       .map((r) => (typeof r.id === "number" ? r.id : Number(r.id)))
@@ -529,7 +533,11 @@ function extractPlainEmail(raw: string): string | null {
   const angleMatch = raw.match(/<([^>]+)>/);
   if (angleMatch) raw = angleMatch[1];
   const t = raw.trim();
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(t) ? t : null;
+  if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(t)) return t;
+  // Salvage corrupted double-email strings like "a@b.comfinance@b.com" —
+  // extract the first valid-looking email pattern.
+  const m = t.match(/[^\s@,;]+@[^\s@,;]+\.[a-z]{2,}/i);
+  return m ? m[0] : null;
 }
 
 function normalizeEmail(v: unknown): string | null {
@@ -561,11 +569,20 @@ export async function resolveOdooRecipientContact(input: {
   const roFlagField = "x_ro_mail_recipient";
   const contactFields = ["id", "name", "email", roFlagField, "active", "parent_id"];
 
-  // Fetch parent company: email + child_ids + user_id (for accounting manager)
+  // Fetch parent company: email + child_ids + user_id (for accounting manager) +
+  // customer_contact_ids and signing_authority_ids (alternative contact storage).
   const parentRows = await input.client.searchReadPartners(
     input.uid,
     [["id", "=", input.partnerId]],
-    ["id", "name", "email", "user_id", "child_ids"],
+    [
+      "id",
+      "name",
+      "email",
+      "user_id",
+      "child_ids",
+      "customer_contact_ids",
+      "signing_authority_ids",
+    ],
     1,
   );
   const parent = parentRows[0];
@@ -610,7 +627,28 @@ export async function resolveOdooRecipientContact(input: {
   );
   mergeRows(byParent);
 
-  console.log(`[D4] partnerId=${input.partnerId} contacts found: ${allChildRows.length} (child_ids=${childIds.length}, parent_id_search=${byParent.length})`);
+  // Path C: customer_contact_ids + signing_authority_ids (Odoo extension fields where
+  // some tenants store the real recipient contacts instead of child records).
+  const altContactIds: number[] = [];
+  for (const key of ["customer_contact_ids", "signing_authority_ids"] as const) {
+    const raw = parent?.[key];
+    if (Array.isArray(raw)) {
+      for (const v of raw) {
+        if (typeof v === "number" && Number.isFinite(v)) altContactIds.push(v);
+      }
+    }
+  }
+  if (altContactIds.length > 0) {
+    const altRows = await input.client.searchReadPartners(
+      input.uid,
+      [["id", "in", [...new Set(altContactIds)]]],
+      contactFields,
+      200,
+    );
+    mergeRows(altRows);
+  }
+
+  console.log(`[D4] partnerId=${input.partnerId} contacts found: ${allChildRows.length} (child_ids=${childIds.length}, parent_id_search=${byParent.length}, alt_contacts=${altContactIds.length})`);
 
   // --- Apply priority ---
   const withEmail = allChildRows
