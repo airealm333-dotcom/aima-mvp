@@ -48,6 +48,12 @@ type OdooPartner = {
   email: string | null;
 };
 
+type OdooUser = {
+  id: number;
+  name: string;
+  email: string;
+};
+
 type DocSummary = {
   id: string;
   drid: string;
@@ -129,6 +135,10 @@ export default function ReviewDetailPage() {
   const [contactSaving, setContactSaving] = useState(false);
   const [contactSaved, setContactSaved] = useState(false);
 
+  // Accounting manager dropdown
+  const [odooUsers, setOdooUsers] = useState<OdooUser[]>([]);
+  const [selectedManagerId, setSelectedManagerId] = useState<number | "">("");
+
   // Manual match
   const [matchSaving, setMatchSaving] = useState(false);
   const [matchError, setMatchError] = useState<string | null>(null);
@@ -165,6 +175,16 @@ export default function ReviewDetailPage() {
       .catch(() => {});
   }, []);
 
+  // ── Fetch Odoo users for manager dropdown ──
+  useEffect(() => {
+    fetch("/api/dashboard/review/odoo-users")
+      .then((r) => r.json())
+      .then((d: { users?: OdooUser[] }) => {
+        setOdooUsers(d.users ?? []);
+      })
+      .catch(() => {});
+  }, []);
+
   // ── Close switcher on outside click ──
   useEffect(() => {
     function handleClick(e: MouseEvent) {
@@ -190,7 +210,15 @@ export default function ReviewDetailPage() {
     setMatchSuccess(false);
     setMatchExpanded(false);
     setMatchedPartnerName(null);
-  }, [currentItem]);
+    // Preselect manager if current item's email matches an Odoo user
+    const mgrEmail = currentItem?.odoo_accounting_manager_email;
+    if (mgrEmail && odooUsers.length > 0) {
+      const u = odooUsers.find((x) => x.email === mgrEmail);
+      setSelectedManagerId(u ? u.id : "");
+    } else {
+      setSelectedManagerId("");
+    }
+  }, [currentItem, odooUsers]);
 
   // ── Fetch all partner names for matched items (for sidebar) ──
   useEffect(() => {
@@ -320,12 +348,20 @@ export default function ReviewDetailPage() {
     setContactSaving(true);
     setContactSaved(false);
     try {
+      const selectedMgr =
+        typeof selectedManagerId === "number"
+          ? odooUsers.find((u) => u.id === selectedManagerId)
+          : null;
       const res = await fetch(
         `/api/dashboard/review/${documentId}/items/${currentItem.index}/contact`,
         {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email: contactEmail }),
+          body: JSON.stringify({
+            email: contactEmail,
+            accountingManagerName: selectedMgr?.name ?? "",
+            accountingManagerEmail: selectedMgr?.email ?? "",
+          }),
         },
       );
       const d = (await res.json()) as { item?: OcrSplitItem; error?: string };
@@ -340,7 +376,7 @@ export default function ReviewDetailPage() {
     } finally {
       setContactSaving(false);
     }
-  }, [currentItem, contactEmail, documentId, doc]);
+  }, [currentItem, contactEmail, selectedManagerId, odooUsers, documentId, doc]);
 
   // ─── Render ───────────────────────────────────────────────────────────────
 
@@ -662,7 +698,7 @@ export default function ReviewDetailPage() {
 
             <hr className="border-zinc-800" />
 
-            {/* Contact email */}
+            {/* Contact email + accounting manager */}
             <section>
               <h3 className="mb-2 text-sm font-semibold text-zinc-300">Contact Email</h3>
               {item.odoo_resolution_method && (
@@ -670,29 +706,48 @@ export default function ReviewDetailPage() {
                   Resolved via: <span className="text-zinc-400">{item.odoo_resolution_method}</span>
                 </p>
               )}
-              <div className="flex gap-2">
-                <input
-                  type="email"
-                  value={contactEmail}
-                  onChange={(e) => { setContactEmail(e.target.value); setContactSaved(false); }}
-                  placeholder="contact@example.com"
-                  className="flex-1 rounded border border-zinc-700 bg-zinc-800 px-2.5 py-1.5 text-sm text-zinc-100 placeholder-zinc-500 outline-none focus:border-blue-500"
-                />
-                <button
-                  onClick={handleSaveContact}
-                  disabled={contactSaving}
-                  className="rounded bg-blue-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-600 disabled:opacity-50"
-                >
-                  {contactSaving ? "Saving…" : contactSaved ? "✓ Saved" : "Save"}
-                </button>
-              </div>
-              {item.odoo_accounting_manager_email && (
-                <p className="mt-2 text-xs text-zinc-500">
-                  Accounting manager:{" "}
-                  <span className="text-zinc-300">
-                    {item.odoo_accounting_manager_name ? `${item.odoo_accounting_manager_name} · ` : ""}
-                    {item.odoo_accounting_manager_email}
-                  </span>
+              <input
+                type="email"
+                value={contactEmail}
+                onChange={(e) => { setContactEmail(e.target.value); setContactSaved(false); }}
+                placeholder="contact@example.com"
+                className="w-full rounded border border-zinc-700 bg-zinc-800 px-2.5 py-1.5 text-sm text-zinc-100 placeholder-zinc-500 outline-none focus:border-blue-500"
+              />
+
+              <label className="mt-3 mb-1 block text-xs font-medium text-zinc-400">
+                Accounting Manager
+              </label>
+              <select
+                value={selectedManagerId === "" ? "" : String(selectedManagerId)}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setSelectedManagerId(v === "" ? "" : Number(v));
+                  setContactSaved(false);
+                }}
+                className="w-full rounded border border-zinc-700 bg-zinc-800 px-2.5 py-1.5 text-sm text-zinc-100 outline-none focus:border-blue-500"
+              >
+                <option value="">— Select manager —</option>
+                {odooUsers.map((u) => (
+                  <option key={u.id} value={u.id}>
+                    {u.name} · {u.email}
+                  </option>
+                ))}
+              </select>
+
+              <button
+                onClick={handleSaveContact}
+                disabled={contactSaving || !contactEmail.trim() || selectedManagerId === ""}
+                className="mt-3 w-full rounded bg-blue-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-600 disabled:opacity-50"
+              >
+                {contactSaving
+                  ? "Saving…"
+                  : contactSaved
+                    ? "✓ Saved — will dispatch"
+                    : "Save & mark as matched"}
+              </button>
+              {(!contactEmail.trim() || selectedManagerId === "") && (
+                <p className="mt-1 text-[11px] text-zinc-500">
+                  Both contact email and accounting manager are required to mark as matched.
                 </p>
               )}
             </section>
