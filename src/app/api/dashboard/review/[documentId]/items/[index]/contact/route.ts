@@ -31,10 +31,28 @@ export async function PATCH(
     return NextResponse.json({ error: "Item index out of range" }, { status: 400 });
   }
 
+  const trimmedEmail = email.trim() || null;
+  const existing = items[itemIndex] as Record<string, unknown>;
+  const existingStatus = existing.odoo_match_status as string | null | undefined;
+
+  // When the user provides a valid contact email, treat it as explicit acceptance.
+  // Promote ambiguous/no_match/null/error statuses to "matched" so the dispatch-poll
+  // can send the email. Keep "matched" as-is.
+  let newStatus = existingStatus;
+  let newMethod = existing.odoo_match_method as string | null | undefined;
+  if (trimmedEmail) {
+    if (!existingStatus || existingStatus !== "matched") {
+      newStatus = "matched";
+      newMethod = "manual_override";
+    }
+  }
+
   items[itemIndex] = {
-    ...items[itemIndex],
-    odoo_contact_email: email.trim() || null,
+    ...existing,
+    odoo_contact_email: trimmedEmail,
     odoo_resolution_method: "manual_override",
+    odoo_match_status: newStatus,
+    odoo_match_method: newMethod,
   };
 
   const { error: updateErr } = await supabase.client
