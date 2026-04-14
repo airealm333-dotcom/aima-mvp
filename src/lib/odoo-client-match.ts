@@ -229,14 +229,15 @@ export async function runOdooClientMatch(
     };
   }
 
-  // Strip trailing " - X" patterns (vessel/project/category suffixes added by LLM extraction).
-  // E.g. "SU-NAV MARINE - SUBARNAREKH" → "SU-NAV MARINE". Only splits on " - " (with spaces),
-  // so hyphenated words like "SU-NAV" are preserved.
+  // Strip trailing " - X" vessel/project/category suffixes added by LLM extraction.
+  // Handles variants: " - X", ". - X", ".- X", ",- X", etc.
+  // The dash must be followed by whitespace so inner hyphens like "SU-NAV" are preserved
+  // (letters before the dash never match `[.\s,;]`).
   const stripSuffix = (s: string | null): string | null => {
     if (!s) return s;
-    const parts = s.split(/\s+-\s+/);
-    if (parts.length > 1 && parts[0] && parts[0].trim().length >= 3) {
-      return parts[0].trim();
+    const m = s.match(/^(.+?)[.\s,;]+-\s+.+$/);
+    if (m && m[1] && m[1].trim().length >= 3) {
+      return m[1].trim();
     }
     return s;
   };
