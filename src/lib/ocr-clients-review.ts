@@ -16,6 +16,8 @@ export function ocrClientItemNeedsReview(
   const conf = item.confidence as number | null | undefined;
   if (conf != null && conf < OCR_CLIENTS_CONFIDENCE_THRESHOLD) return true;
   const status = item.odoo_match_status as string | null | undefined;
+  // Null/empty/error status = Odoo matching never ran (auth failure, timeout, etc.)
+  if (!status || status === "error") return true;
   if (status === "no_match") return true;
   if (status === "ambiguous") return true;
   if (status === "matched" && !item.odoo_contact_email) return true;
