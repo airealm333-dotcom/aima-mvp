@@ -124,6 +124,8 @@ function reviewReasons(item: OcrSplitItem): string[] {
   const r: string[] = [];
   if (item.confidence != null && item.confidence < CONFIDENCE_THRESHOLD)
     r.push(`Low confidence (${item.confidence}%)`);
+  if (!item.odoo_match_status || item.odoo_match_status === "error")
+    r.push("Match not run");
   if (item.odoo_match_status === "no_match") r.push("No Odoo match");
   if (item.odoo_match_status === "ambiguous") r.push("Ambiguous match");
   if (item.odoo_match_status === "matched" && !item.odoo_contact_email)
