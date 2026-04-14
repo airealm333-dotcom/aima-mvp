@@ -29,6 +29,9 @@ type OcrSplitItem = {
   odoo_accounting_manager_name: string | null;
   sender_name: string | null;
   sender_address: string | null;
+  document_date: string | null;
+  odoo_contact_name: string | null;
+  dispatched_at: string | null;
 };
 
 type ReviewDoc = {
@@ -734,22 +737,42 @@ export default function ReviewDetailPage() {
                 ))}
               </select>
 
-              <button
-                onClick={handleSaveContact}
-                disabled={contactSaving || !contactEmail.trim() || selectedManagerId === ""}
-                className="mt-3 w-full rounded bg-blue-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-600 disabled:opacity-50"
-              >
-                {contactSaving
-                  ? "Saving…"
-                  : contactSaved
-                    ? "✓ Saved — will dispatch"
-                    : "Save & mark as matched"}
-              </button>
-              {(!contactEmail.trim() || selectedManagerId === "") && (
-                <p className="mt-1 text-[11px] text-zinc-500">
-                  Both contact email and accounting manager are required to mark as matched.
-                </p>
-              )}
+              {(() => {
+                const alreadyDispatched = Boolean(item.dispatched_at);
+                const alreadyMatched = item.odoo_match_status === "matched";
+                const missingInputs = !contactEmail.trim() || selectedManagerId === "";
+
+                if (alreadyDispatched) {
+                  return (
+                    <p className="mt-3 rounded border border-green-800/50 bg-green-950/30 px-3 py-2 text-xs text-green-300">
+                      ✓ Email already dispatched — no further action needed.
+                    </p>
+                  );
+                }
+
+                return (
+                  <>
+                    <button
+                      onClick={handleSaveContact}
+                      disabled={contactSaving || missingInputs}
+                      className="mt-3 w-full rounded bg-blue-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-600 disabled:opacity-50"
+                    >
+                      {contactSaving
+                        ? "Saving…"
+                        : contactSaved
+                          ? "✓ Saved — will dispatch"
+                          : alreadyMatched
+                            ? "Update contact / manager"
+                            : "Save & mark as matched"}
+                    </button>
+                    {missingInputs && !alreadyMatched && (
+                      <p className="mt-1 text-[11px] text-zinc-500">
+                        Both contact email and accounting manager are required to mark as matched.
+                      </p>
+                    )}
+                  </>
+                );
+              })()}
             </section>
 
           </aside>
