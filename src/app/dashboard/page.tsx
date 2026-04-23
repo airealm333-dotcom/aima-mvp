@@ -123,6 +123,7 @@ function mailItem(doc: DashboardDoc): MailItemEmbed {
 }
 
 function reviewReasons(item: OcrSplitItem): string[] {
+  if (item.dispatched_at) return [];
   if (item.deferred_at) return [];
   const r: string[] = [];
   if (item.confidence != null && item.confidence < CONFIDENCE_THRESHOLD)

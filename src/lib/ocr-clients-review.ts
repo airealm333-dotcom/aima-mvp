@@ -9,6 +9,7 @@ export type OcrClientReviewFields = {
   UEN?: string | null;
   pdfError?: string | null;
   deferred_at?: string | null;
+  dispatched_at?: string | null;
 };
 
 export function ocrClientItemIsDeferred(
@@ -20,6 +21,8 @@ export function ocrClientItemIsDeferred(
 export function ocrClientItemNeedsReview(
   item: OcrClientReviewFields | Record<string, unknown>,
 ): boolean {
+  // Already dispatched — email has gone, no review possible.
+  if (item.dispatched_at) return false;
   // Deferred items are parked — not in needs-review, not dispatchable.
   if (ocrClientItemIsDeferred(item)) return false;
   const conf = item.confidence as number | null | undefined;

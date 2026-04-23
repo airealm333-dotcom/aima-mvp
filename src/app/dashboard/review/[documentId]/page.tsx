@@ -72,6 +72,7 @@ type DocSummary = {
 const CONFIDENCE_THRESHOLD = 70;
 
 function reviewReasons(item: OcrSplitItem): string[] {
+  if (item.dispatched_at) return [];
   if (item.deferred_at) return [];
   const r: string[] = [];
   if (item.confidence != null && item.confidence < CONFIDENCE_THRESHOLD)
@@ -804,58 +805,56 @@ export default function ReviewDetailPage() {
                 const missingInputs = !contactEmail.trim() || selectedManagerId === "";
                 const isDeferred = Boolean(item.deferred_at);
 
-                if (alreadyDispatched) {
-                  return (
-                    <p className="mt-3 rounded border border-green-800/50 bg-green-950/30 px-3 py-2 text-xs text-green-300">
-                      ✓ Email already dispatched — no further action needed.
-                    </p>
-                  );
-                }
-
-                if (isDeferred) {
-                  return (
-                    <>
+                return (
+                  <>
+                    {/* Status banner (informational) */}
+                    {alreadyDispatched && (
+                      <p className="mt-3 rounded border border-green-800/50 bg-green-950/30 px-3 py-2 text-xs text-green-300">
+                        ✓ Email already dispatched — no further action needed.
+                      </p>
+                    )}
+                    {isDeferred && !alreadyDispatched && (
                       <p className="mt-3 rounded border border-zinc-700 bg-zinc-900/50 px-3 py-2 text-xs text-zinc-400">
                         ⏸ Deferred — will not be dispatched until un-deferred.
                       </p>
+                    )}
+
+                    {/* Save form (only if actionable — not dispatched, not deferred) */}
+                    {!alreadyDispatched && !isDeferred && (
+                      <>
+                        <button
+                          onClick={handleSaveContact}
+                          disabled={contactSaving || missingInputs}
+                          className="mt-3 w-full rounded bg-blue-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-600 disabled:opacity-50"
+                        >
+                          {contactSaving
+                            ? "Saving…"
+                            : contactSaved
+                              ? "✓ Saved — will dispatch"
+                              : alreadyMatched
+                                ? "Update contact / manager"
+                                : "Save & mark as matched"}
+                        </button>
+                        {missingInputs && !alreadyMatched && (
+                          <p className="mt-1 text-[11px] text-zinc-500">
+                            Both contact email and accounting manager are required to mark as matched.
+                          </p>
+                        )}
+                      </>
+                    )}
+
+                    {/* Defer toggle — always available unless item is already dispatched */}
+                    {!alreadyDispatched && (
                       <button
                         onClick={handleToggleDefer}
                         disabled={deferSaving}
-                        className="mt-2 w-full rounded border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-700 disabled:opacity-50"
+                        className="mt-2 w-full rounded border border-zinc-700 bg-transparent px-3 py-1.5 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50"
                       >
-                        {deferSaving ? "Undoing…" : "Undo defer"}
+                        {deferSaving
+                          ? isDeferred ? "Undoing…" : "Deferring…"
+                          : isDeferred ? "Undo defer" : "Defer (review later)"}
                       </button>
-                    </>
-                  );
-                }
-
-                return (
-                  <>
-                    <button
-                      onClick={handleSaveContact}
-                      disabled={contactSaving || missingInputs}
-                      className="mt-3 w-full rounded bg-blue-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-600 disabled:opacity-50"
-                    >
-                      {contactSaving
-                        ? "Saving…"
-                        : contactSaved
-                          ? "✓ Saved — will dispatch"
-                          : alreadyMatched
-                            ? "Update contact / manager"
-                            : "Save & mark as matched"}
-                    </button>
-                    {missingInputs && !alreadyMatched && (
-                      <p className="mt-1 text-[11px] text-zinc-500">
-                        Both contact email and accounting manager are required to mark as matched.
-                      </p>
                     )}
-                    <button
-                      onClick={handleToggleDefer}
-                      disabled={deferSaving}
-                      className="mt-2 w-full rounded border border-zinc-700 bg-transparent px-3 py-1.5 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50"
-                    >
-                      {deferSaving ? "Deferring…" : "Defer (review later)"}
-                    </button>
                   </>
                 );
               })()}
