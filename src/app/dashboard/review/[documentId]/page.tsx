@@ -32,6 +32,7 @@ type OcrSplitItem = {
   document_date: string | null;
   odoo_contact_name: string | null;
   dispatched_at: string | null;
+  deferred_at: string | null;
 };
 
 type ReviewDoc = {
@@ -63,6 +64,7 @@ type DocSummary = {
   created_at: string;
   totalItems: number;
   reviewCount: number;
+  deferredCount?: number;
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -70,6 +72,7 @@ type DocSummary = {
 const CONFIDENCE_THRESHOLD = 70;
 
 function reviewReasons(item: OcrSplitItem): string[] {
+  if (item.deferred_at) return [];
   const r: string[] = [];
   if (item.confidence != null && item.confidence < CONFIDENCE_THRESHOLD)
     r.push(`Low confidence (${Math.round(item.confidence)}%)`);
@@ -112,6 +115,7 @@ export default function ReviewDetailPage() {
 
   // Document switcher
   const [needsReviewDocs, setNeedsReviewDocs] = useState<DocSummary[]>([]);
+  const [deferredDocs, setDeferredDocs] = useState<DocSummary[]>([]);
   const [processedDocs, setProcessedDocs] = useState<DocSummary[]>([]);
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const switcherRef = useRef<HTMLDivElement>(null);
@@ -142,6 +146,9 @@ export default function ReviewDetailPage() {
   const [odooUsers, setOdooUsers] = useState<OdooUser[]>([]);
   const [selectedManagerId, setSelectedManagerId] = useState<number | "">("");
 
+  // Defer
+  const [deferSaving, setDeferSaving] = useState(false);
+
   // Manual match
   const [matchSaving, setMatchSaving] = useState(false);
   const [matchError, setMatchError] = useState<string | null>(null);
@@ -171,10 +178,17 @@ export default function ReviewDetailPage() {
   useEffect(() => {
     fetch("/api/dashboard/review")
       .then((r) => r.json())
-      .then((d: { needsReview?: DocSummary[]; processed?: DocSummary[] }) => {
-        setNeedsReviewDocs(d.needsReview ?? []);
-        setProcessedDocs(d.processed ?? []);
-      })
+      .then(
+        (d: {
+          needsReview?: DocSummary[];
+          deferred?: DocSummary[];
+          processed?: DocSummary[];
+        }) => {
+          setNeedsReviewDocs(d.needsReview ?? []);
+          setDeferredDocs(d.deferred ?? []);
+          setProcessedDocs(d.processed ?? []);
+        },
+      )
       .catch(() => {});
   }, []);
 
@@ -381,9 +395,35 @@ export default function ReviewDetailPage() {
     }
   }, [currentItem, contactEmail, selectedManagerId, odooUsers, documentId, doc]);
 
+  // ── Defer / Undo defer ──
+  const handleToggleDefer = useCallback(async () => {
+    if (!currentItem) return;
+    setDeferSaving(true);
+    try {
+      const res = await fetch(
+        `/api/dashboard/review/${documentId}/items/${currentItem.index}/defer`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ deferred: !currentItem.deferred_at }),
+        },
+      );
+      const d = (await res.json()) as { item?: OcrSplitItem; error?: string };
+      if (d.item && doc) {
+        const updatedItems = doc.ocr_clients_items?.map((it) =>
+          it.index === currentItem.index ? (d.item as OcrSplitItem) : it,
+        ) ?? null;
+        setDoc({ ...doc, ocr_clients_items: updatedItems });
+      }
+    } finally {
+      setDeferSaving(false);
+    }
+  }, [currentItem, documentId, doc]);
+
   // ─── Render ───────────────────────────────────────────────────────────────
 
-  const allDocCount = needsReviewDocs.length + processedDocs.length;
+  const allDocCount =
+    needsReviewDocs.length + deferredDocs.length + processedDocs.length;
 
   if (loading) {
     return (
@@ -441,6 +481,27 @@ export default function ReviewDetailPage() {
                       <span className="font-mono">{d.drid}</span>
                       <span className="ml-3 flex-shrink-0 rounded bg-amber-900/40 px-1.5 py-0.5 text-[10px] text-amber-400">
                         {d.reviewCount}/{d.totalItems} flagged
+                      </span>
+                    </button>
+                  ))}
+                </>
+              )}
+
+              {deferredDocs.length > 0 && (
+                <>
+                  <div className="my-1 border-t border-zinc-800" />
+                  <p className="px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-zinc-400">
+                    ⏸ Deferred
+                  </p>
+                  {deferredDocs.map((d) => (
+                    <button
+                      key={d.id}
+                      onClick={() => { setSwitcherOpen(false); router.push(`/dashboard/review/${d.id}`); }}
+                      className={`flex w-full items-center justify-between px-3 py-2 text-left text-sm transition-colors hover:bg-zinc-800 ${d.id === documentId ? "text-zinc-200" : "text-zinc-400"}`}
+                    >
+                      <span className="font-mono">{d.drid}</span>
+                      <span className="ml-3 flex-shrink-0 rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400">
+                        {d.deferredCount ?? 0} deferred
                       </span>
                     </button>
                   ))}
@@ -741,12 +802,30 @@ export default function ReviewDetailPage() {
                 const alreadyDispatched = Boolean(item.dispatched_at);
                 const alreadyMatched = item.odoo_match_status === "matched";
                 const missingInputs = !contactEmail.trim() || selectedManagerId === "";
+                const isDeferred = Boolean(item.deferred_at);
 
                 if (alreadyDispatched) {
                   return (
                     <p className="mt-3 rounded border border-green-800/50 bg-green-950/30 px-3 py-2 text-xs text-green-300">
                       ✓ Email already dispatched — no further action needed.
                     </p>
+                  );
+                }
+
+                if (isDeferred) {
+                  return (
+                    <>
+                      <p className="mt-3 rounded border border-zinc-700 bg-zinc-900/50 px-3 py-2 text-xs text-zinc-400">
+                        ⏸ Deferred — will not be dispatched until un-deferred.
+                      </p>
+                      <button
+                        onClick={handleToggleDefer}
+                        disabled={deferSaving}
+                        className="mt-2 w-full rounded border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-700 disabled:opacity-50"
+                      >
+                        {deferSaving ? "Undoing…" : "Undo defer"}
+                      </button>
+                    </>
                   );
                 }
 
@@ -770,6 +849,13 @@ export default function ReviewDetailPage() {
                         Both contact email and accounting manager are required to mark as matched.
                       </p>
                     )}
+                    <button
+                      onClick={handleToggleDefer}
+                      disabled={deferSaving}
+                      className="mt-2 w-full rounded border border-zinc-700 bg-transparent px-3 py-1.5 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50"
+                    >
+                      {deferSaving ? "Deferring…" : "Defer (review later)"}
+                    </button>
                   </>
                 );
               })()}

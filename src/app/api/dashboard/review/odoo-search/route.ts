@@ -27,6 +27,13 @@ export async function GET(req: Request) {
       return NextResponse.json({ debug: true, count: rows.length, partners: rows });
     }
 
+    // Build the `fields` list from the base columns + whichever custom fields
+    // are actually configured. Skip null/empty ones so Odoo doesn't reject the query.
+    const readFields = ["id", "name", "email", "vat", cfg.fieldUen, "l10n_sg_unique_entity_number"];
+    if (cfg.fieldLegal) readFields.push(cfg.fieldLegal);
+    if (cfg.fieldTrading) readFields.push(cfg.fieldTrading);
+    const fields = [...new Set(readFields.filter((v): v is string => Boolean(v)))];
+
     // Single partner lookup by ID
     if (idParam) {
       const id = Number(idParam);
@@ -34,7 +41,7 @@ export async function GET(req: Request) {
       const rows = await client.searchReadPartners(
         uid,
         [["id", "=", id]],
-        ["id", "name", cfg.fieldUen, cfg.fieldLegal, "email"],
+        fields,
         1,
       );
       const r = rows[0];
@@ -43,8 +50,12 @@ export async function GET(req: Request) {
         partner: {
           id: r.id as number,
           name: (r.name as string) ?? "",
-          uen: (r[cfg.fieldUen] as string | null) ?? null,
-          legalName: (r[cfg.fieldLegal] as string | null) ?? null,
+          uen:
+            (r[cfg.fieldUen] as string | null) ??
+            (r.l10n_sg_unique_entity_number as string | null) ??
+            (r.vat as string | null) ??
+            null,
+          legalName: cfg.fieldLegal ? ((r[cfg.fieldLegal] as string | null) ?? null) : null,
           email: (r.email as string | null) ?? null,
         },
       });
@@ -53,24 +64,22 @@ export async function GET(req: Request) {
     if (!q) return NextResponse.json({ partners: [] });
 
     const like = `%${q}%`;
-    // Search across all common UEN/name fields, including Odoo's SG localization
-    // field `l10n_sg_unique_entity_number` which is where the real UEN lives.
-    const domain = [
-      "|", "|", "|", "|", "|",
+    // Build domain from only the real fields. Skip null custom fields (not installed).
+    const branches: unknown[] = [
       ["name", "ilike", like],
       [cfg.fieldUen, "ilike", like],
       ["l10n_sg_unique_entity_number", "ilike", like],
-      [cfg.fieldLegal, "ilike", like],
-      [cfg.fieldTrading, "ilike", like],
       ["vat", "ilike", like],
     ];
+    if (cfg.fieldLegal) branches.push([cfg.fieldLegal, "ilike", like]);
+    if (cfg.fieldTrading) branches.push([cfg.fieldTrading, "ilike", like]);
 
-    const rows = await client.searchReadPartners(
-      uid,
-      domain,
-      ["id", "name", cfg.fieldUen, "l10n_sg_unique_entity_number", cfg.fieldLegal, "email", "vat"],
-      30,
-    );
+    // Odoo prefix-OR: N leaves require N-1 leading `'|'`
+    const domain: unknown[] = [];
+    for (let i = 0; i < branches.length - 1; i += 1) domain.push("|");
+    for (const b of branches) domain.push(b);
+
+    const rows = await client.searchReadPartners(uid, domain, fields, 30);
 
     console.log(`[odoo-search] q="${q}" matched ${rows.length} partners`);
 
@@ -82,13 +91,21 @@ export async function GET(req: Request) {
         (r.l10n_sg_unique_entity_number as string | null) ??
         (r.vat as string | null) ??
         null,
-      legalName: (r[cfg.fieldLegal] as string | null) ?? null,
+      legalName: cfg.fieldLegal ? ((r[cfg.fieldLegal] as string | null) ?? null) : null,
       email: (r.email as string | null) ?? null,
     }));
 
     return NextResponse.json({ partners });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    return NextResponse.json({ error: msg }, { status: 500 });
+    const data = (e as { data?: unknown }).data;
+    const code = (e as { code?: number }).code;
+    console.error(
+      `[odoo-search] error (q="${q}" id=${idParam}) code=${code ?? "?"} msg="${msg}"`,
+    );
+    if (data) {
+      console.error(`[odoo-search] error data:`, JSON.stringify(data, null, 2).slice(0, 2000));
+    }
+    return NextResponse.json({ error: msg, code, data }, { status: 500 });
   }
 }

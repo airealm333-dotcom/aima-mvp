@@ -8,11 +8,20 @@ export type OcrClientReviewFields = {
   odoo_contact_email?: string | null;
   UEN?: string | null;
   pdfError?: string | null;
+  deferred_at?: string | null;
 };
+
+export function ocrClientItemIsDeferred(
+  item: OcrClientReviewFields | Record<string, unknown>,
+): boolean {
+  return Boolean(item.deferred_at);
+}
 
 export function ocrClientItemNeedsReview(
   item: OcrClientReviewFields | Record<string, unknown>,
 ): boolean {
+  // Deferred items are parked — not in needs-review, not dispatchable.
+  if (ocrClientItemIsDeferred(item)) return false;
   const conf = item.confidence as number | null | undefined;
   if (conf != null && conf < OCR_CLIENTS_CONFIDENCE_THRESHOLD) return true;
   const status = item.odoo_match_status as string | null | undefined;
@@ -31,4 +40,10 @@ export function countOcrClientItemsNeedingReview(
   items: Array<OcrClientReviewFields | Record<string, unknown>>,
 ): number {
   return items.filter(ocrClientItemNeedsReview).length;
+}
+
+export function countOcrClientItemsDeferred(
+  items: Array<OcrClientReviewFields | Record<string, unknown>>,
+): number {
+  return items.filter(ocrClientItemIsDeferred).length;
 }

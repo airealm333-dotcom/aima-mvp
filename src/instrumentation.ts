@@ -79,7 +79,7 @@ export async function register() {
           ? (doc.ocr_clients_items as Item[])
           : [];
 
-        const undispatched = items.filter((it) => !it.dispatched_at);
+        const undispatched = items.filter((it) => !it.dispatched_at && !(it as { deferred_at?: string | null }).deferred_at);
         if (undispatched.length === 0) continue;
 
         const cleanItems = undispatched.filter((it) => !ocrClientItemNeedsReview(it));

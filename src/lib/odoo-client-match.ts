@@ -16,8 +16,12 @@ export type OdooMatchEnvConfig = {
   password: string;
   timeoutMs: number;
   fieldUen: string;
-  fieldLegal: string;
-  fieldTrading: string;
+  /** Null if ODOO_FIELD_LEGAL_NAME is empty — skip legal-name searches entirely. */
+  fieldLegal: string | null;
+  /** Null if ODOO_FIELD_TRADING_NAME is empty — skip trading-name searches entirely. */
+  fieldTrading: string | null;
+  /** Null if ODOO_FIELD_RO_MAIL_RECIPIENT is empty — skip primary-contact detection. */
+  fieldRoMailRecipient: string | null;
   fuzzyCandidateLimit: number;
 };
 
@@ -62,6 +66,13 @@ function safeFieldName(raw: string, fallback: string): string {
   return /^[a-zA-Z0-9_.]+$/.test(t) ? t : fallback;
 }
 
+/** Returns a valid field name, or null if the env var is intentionally empty. */
+function optionalFieldName(raw: string | undefined): string | null {
+  const t = (raw ?? "").trim();
+  if (!t) return null;
+  return /^[a-zA-Z0-9_.]+$/.test(t) ? t : null;
+}
+
 function parsePositiveInt(raw: string | undefined, defaultVal: number): number {
   const n = Number(raw);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : defaultVal;
@@ -83,15 +94,13 @@ export function loadOdooMatchConfigFromEnv(): OdooMatchEnvConfig | null {
     username,
     password,
     timeoutMs: parsePositiveInt(process.env.ODOO_JSONRPC_TIMEOUT_MS, 20_000),
-    fieldUen: safeFieldName(process.env.ODOO_FIELD_UEN ?? "", "x_uen"),
-    fieldLegal: safeFieldName(
-      process.env.ODOO_FIELD_LEGAL_NAME ?? "",
-      "x_legal_name",
+    fieldUen: safeFieldName(
+      process.env.ODOO_FIELD_UEN ?? "",
+      "l10n_sg_unique_entity_number",
     ),
-    fieldTrading: safeFieldName(
-      process.env.ODOO_FIELD_TRADING_NAME ?? "",
-      "x_trading_name",
-    ),
+    fieldLegal: optionalFieldName(process.env.ODOO_FIELD_LEGAL_NAME),
+    fieldTrading: optionalFieldName(process.env.ODOO_FIELD_TRADING_NAME),
+    fieldRoMailRecipient: optionalFieldName(process.env.ODOO_FIELD_RO_MAIL_RECIPIENT),
     fuzzyCandidateLimit: parsePositiveInt(
       process.env.ODOO_FUZZY_CANDIDATE_LIMIT,
       120,
@@ -249,7 +258,14 @@ export async function runOdooClientMatch(
 
   const { fieldUen, fieldLegal, fieldTrading, fuzzyCandidateLimit } = cfg;
 
-  const fields = ["id", "name", fieldUen, fieldLegal, fieldTrading, "parent_id"].filter(
+  const fields = [
+    "id",
+    "name",
+    fieldUen,
+    fieldLegal,
+    fieldTrading,
+    "parent_id",
+  ].filter((v): v is string => Boolean(v)).filter(
     (v, i, a) => a.indexOf(v) === i,
   );
 
@@ -314,10 +330,10 @@ export async function runOdooClientMatch(
 
     for (const n of uniqueNorms) {
       // Use wildcards so we still fetch candidates when Odoo stores punctuation/suffixes
-      // that were removed by normalization.
+      // that were removed by normalization. Skip empty field configs.
       const pattern = `%${n}%`;
-      orBranches.push([fieldLegal, "ilike", pattern]);
-      orBranches.push([fieldTrading, "ilike", pattern]);
+      if (fieldLegal) orBranches.push([fieldLegal, "ilike", pattern]);
+      if (fieldTrading) orBranches.push([fieldTrading, "ilike", pattern]);
       orBranches.push(["name", "ilike", pattern]);
     }
 
@@ -332,8 +348,8 @@ export async function runOdooClientMatch(
 
       const exactHits = rows.filter((p) => {
         const parts = [
-          partnerField(p, fieldLegal),
-          partnerField(p, fieldTrading),
+          fieldLegal ? partnerField(p, fieldLegal) : null,
+          fieldTrading ? partnerField(p, fieldTrading) : null,
           partnerField(p, "name"),
         ];
         for (const target of uniqueNorms) {
@@ -402,13 +418,12 @@ export async function runOdooClientMatch(
     const domainParts: unknown[] = [];
     for (const token of uniqueTokens) {
       const like = `%${token}%`;
-      domainParts.push(
-        "|",
-        "|",
-        [fieldLegal, "ilike", like],
-        [fieldTrading, "ilike", like],
-        ["name", "ilike", like],
-      );
+      const branches: unknown[] = [];
+      if (fieldLegal) branches.push([fieldLegal, "ilike", like]);
+      if (fieldTrading) branches.push([fieldTrading, "ilike", like]);
+      branches.push(["name", "ilike", like]);
+      for (let i = 0; i < branches.length - 1; i += 1) domainParts.push("|");
+      for (const b of branches) domainParts.push(b);
     }
     try {
       rows = await client.searchReadPartners(
@@ -438,13 +453,13 @@ export async function runOdooClientMatch(
     }
 
     const like = `%${needle}%`;
-    const fuzzyDomain: unknown[] = [
-      "|",
-      "|",
-      [fieldLegal, "ilike", like],
-      [fieldTrading, "ilike", like],
-      ["name", "ilike", like],
-    ];
+    const fuzzyDomain: unknown[] = [];
+    const fuzzyBranches: unknown[] = [];
+    if (fieldLegal) fuzzyBranches.push([fieldLegal, "ilike", like]);
+    if (fieldTrading) fuzzyBranches.push([fieldTrading, "ilike", like]);
+    fuzzyBranches.push(["name", "ilike", like]);
+    for (let i = 0; i < fuzzyBranches.length - 1; i += 1) fuzzyDomain.push("|");
+    for (const b of fuzzyBranches) fuzzyDomain.push(b);
 
     rows = await client.searchReadPartners(
       uid,
@@ -457,8 +472,8 @@ export async function runOdooClientMatch(
 
   const scored: OdooPartnerCandidate[] = rows.map((p) => {
     const id = typeof p.id === "number" ? p.id : Number(p.id);
-    const pLegal = partnerField(p, fieldLegal);
-    const pTrade = partnerField(p, fieldTrading);
+    const pLegal = fieldLegal ? partnerField(p, fieldLegal) : null;
+    const pTrade = fieldTrading ? partnerField(p, fieldTrading) : null;
     const pName = partnerField(p, "name");
 
     let score = 0;
@@ -567,8 +582,9 @@ export async function resolveOdooRecipientContact(input: {
   cfg: OdooMatchEnvConfig;
   partnerId: number;
 }): Promise<OdooResolvedContact> {
-  const roFlagField = "x_ro_mail_recipient";
-  const contactFields = ["id", "name", "email", roFlagField, "active", "parent_id"];
+  const roFlagField = input.cfg.fieldRoMailRecipient;
+  const contactFields = ["id", "name", "email", "active", "parent_id"];
+  if (roFlagField) contactFields.push(roFlagField);
 
   // Fetch parent company: email + child_ids + user_id (for accounting manager) +
   // customer_contact_ids and signing_authority_ids (alternative contact storage).
@@ -657,7 +673,7 @@ export async function resolveOdooRecipientContact(input: {
       id: typeof r.id === "number" ? r.id : Number(r.id),
       name: typeof r.name === "string" ? r.name : null,
       email: normalizeEmail(r.email),
-      isPrimary: isTruthy(r[roFlagField]),
+      isPrimary: roFlagField ? isTruthy(r[roFlagField]) : false,
     }))
     .filter((r) => Number.isFinite(r.id) && r.email != null) as Array<{
     id: number;

@@ -1,5 +1,8 @@
 import { NextResponse } from "next/server";
-import { countOcrClientItemsNeedingReview } from "@/lib/ocr-clients-review";
+import {
+  countOcrClientItemsDeferred,
+  countOcrClientItemsNeedingReview,
+} from "@/lib/ocr-clients-review";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 
 export const runtime = "nodejs";
@@ -27,12 +30,18 @@ export async function GET() {
       created_at: doc.created_at as string,
       totalItems: items.length,
       reviewCount: countOcrClientItemsNeedingReview(items),
+      deferredCount: countOcrClientItemsDeferred(items),
     };
   });
 
-  // Split into two groups: needs review first, then clean
+  // Three buckets: needs review > deferred > processed
   const needsReview = docs.filter((d) => d.reviewCount > 0);
-  const processed = docs.filter((d) => d.reviewCount === 0 && d.totalItems > 0);
+  const deferred = docs.filter(
+    (d) => d.reviewCount === 0 && d.deferredCount > 0,
+  );
+  const processed = docs.filter(
+    (d) => d.reviewCount === 0 && d.deferredCount === 0 && d.totalItems > 0,
+  );
 
-  return NextResponse.json({ needsReview, processed });
+  return NextResponse.json({ needsReview, deferred, processed });
 }

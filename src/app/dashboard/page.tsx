@@ -32,6 +32,8 @@ type OcrSplitItem = {
   odoo_resolution_method: string | null;
   odoo_accounting_manager_email: string | null;
   odoo_accounting_manager_name: string | null;
+  deferred_at: string | null;
+  dispatched_at: string | null;
 };
 
 type OcrSummary = {
@@ -121,6 +123,7 @@ function mailItem(doc: DashboardDoc): MailItemEmbed {
 }
 
 function reviewReasons(item: OcrSplitItem): string[] {
+  if (item.deferred_at) return [];
   const r: string[] = [];
   if (item.confidence != null && item.confidence < CONFIDENCE_THRESHOLD)
     r.push(`Low confidence (${item.confidence}%)`);
@@ -229,7 +232,7 @@ function KanbanCol({
   children: React.ReactNode;
 }) {
   return (
-    <div className={`flex flex-col rounded-xl border border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/40 ${grow ? "min-w-80 flex-1" : "w-72 shrink-0"}`}>
+    <div className={`flex flex-col rounded-xl border border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/40 ${grow ? "min-w-64 flex-1" : "w-52 shrink-0"}`}>
       <div
         className={`flex items-center gap-2 border-b border-zinc-200 px-4 py-3 dark:border-zinc-800 ${accent}`}
       >
@@ -601,6 +604,8 @@ export default function DashboardPage() {
   const reviewCount = allClientItems.filter(
     (f) => f.reviewReasons.length > 0,
   ).length;
+  const deferredItems = allClientItems.filter((f) => f.item.deferred_at);
+  const deferredCount = deferredItems.length;
 
 
   const isActive =
@@ -625,6 +630,7 @@ export default function DashboardPage() {
             />
             <Stat label="Processed" value={data.processed.length} />
             <Stat label="Needs Review" value={reviewCount} warn />
+            <Stat label="Deferred" value={deferredCount} />
           </div>
         ) : null}
 
@@ -744,6 +750,25 @@ export default function DashboardPage() {
                       flat={f}
                     />
                   ))
+              )}
+            </KanbanCol>
+
+            {/* Column 5 — Deferred */}
+            <KanbanCol
+              title="⏸ Deferred"
+              count={deferredCount}
+              accent="text-zinc-700 dark:text-zinc-300"
+              grow
+            >
+              {deferredCount === 0 ? (
+                <EmptyState text="No items deferred." />
+              ) : (
+                deferredItems.map((f) => (
+                  <ReviewCard
+                    key={`${f.docId}-${f.item.index}`}
+                    flat={f}
+                  />
+                ))
               )}
             </KanbanCol>
           </div>
