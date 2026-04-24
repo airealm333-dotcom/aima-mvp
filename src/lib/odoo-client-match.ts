@@ -751,6 +751,59 @@ export async function resolveOdooRecipientContact(input: {
   if (parent && companyEmail) {
     const id = typeof parent.id === "number" ? parent.id : Number(parent.id);
     const companyName = typeof parent.name === "string" ? parent.name : null;
+
+    // Look up any person (is_company=false) whose own email matches the company
+    // email — that's the "primary contact" whose name we can use for the greeting.
+    // This lets the email body say "Dear Ankur Pahuja" instead of "Dear Sir/Madam".
+    let personName: string | null = null;
+    let personId: number | null = null;
+    try {
+      const matches = (await input.client.executeKw(
+        input.uid,
+        "res.partner",
+        "search_read",
+        [[
+          ["email", "=ilike", companyEmail],
+          ["is_company", "=", false],
+        ]],
+        {
+          fields: ["id", "name"],
+          limit: 5,
+          context: { active_test: false },
+        },
+      )) as Array<{ id: number; name: string }>;
+      // Prefer a match whose name doesn't look like an email (sometimes records have
+      // their name set to the email itself — skip those).
+      const person = matches.find(
+        (m) => typeof m.name === "string" && m.name.trim() && !m.name.includes("@"),
+      );
+      if (person) {
+        personName = person.name;
+        personId = typeof person.id === "number" ? person.id : Number(person.id);
+      }
+    } catch (e) {
+      // Non-fatal — fall back to company name
+      console.log(
+        `[D4] partnerId=${input.partnerId} person lookup failed: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+
+    if (personName) {
+      console.log(
+        `[D4] partnerId=${input.partnerId} → company_email <${companyEmail}> (contact="${personName}")`,
+      );
+      return {
+        contactId: personId ?? (Number.isFinite(id) ? id : null),
+        contactName: personName,
+        email: companyEmail,
+        // Use "primary_contact" so the email template picks up the contact name
+        // for the "Dear <name>" greeting line.
+        resolutionMethod: "primary_contact",
+        accountingManagerEmail,
+        accountingManagerName,
+      };
+    }
+
     console.log(`[D4] partnerId=${input.partnerId} → company_email <${companyEmail}>`);
     return {
       contactId: Number.isFinite(id) ? id : null,
