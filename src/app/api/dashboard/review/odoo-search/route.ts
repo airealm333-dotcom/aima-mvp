@@ -15,16 +15,85 @@ export async function GET(req: Request) {
   try {
     const { client, uid } = await authenticateOdooForMatch(cfg);
 
-    // Debug mode: dump all fields of a partner by name match
-    if (debug && q) {
+    // Debug mode: dump all important fields of a partner by name match or by id
+    if (debug) {
+      const domain: unknown[] = idParam
+        ? [["id", "=", Number(idParam)]]
+        : q
+          ? [["name", "ilike", `%${q}%`]]
+          : [];
+      if (domain.length === 0) {
+        return NextResponse.json({ error: "Provide ?q=<name> or ?id=<n>" }, { status: 400 });
+      }
+
+      // Fetch ALL field names first via fields_get, then read them all.
+      // This reveals any custom x_*/l10n_*/spade_* fields added by extension modules.
+      const fieldsMeta = (await client.executeKw(
+        uid,
+        "res.partner",
+        "fields_get",
+        [],
+        { attributes: ["type"] },
+      )) as Record<string, { type?: string }>;
+
+      // Skip field types that are expensive or break search_read in Odoo 19:
+      // - binary (images/files — huge payload)
+      // - one2many (can be heavy reverse relations)
+      // - json / html (sometimes break on special chars)
+      // Keep: char, text, boolean, integer, float, date, datetime, selection,
+      //       many2one, many2many, reference (these are the interesting ones)
+      const keepTypes = new Set([
+        "char",
+        "text",
+        "boolean",
+        "integer",
+        "float",
+        "monetary",
+        "date",
+        "datetime",
+        "selection",
+        "many2one",
+        "many2many",
+        "reference",
+      ]);
+      const debugFields = Object.entries(fieldsMeta)
+        .filter(([, meta]) => keepTypes.has(meta.type ?? ""))
+        .map(([name]) => name);
+
       const rows = (await client.executeKw(
         uid,
         "res.partner",
         "search_read",
-        [[["name", "ilike", `%${q}%`]]],
-        { fields: [], limit: 3 },
+        [domain],
+        { fields: debugFields, limit: 5, context: { active_test: false } },
       )) as Record<string, unknown>[];
-      return NextResponse.json({ debug: true, count: rows.length, partners: rows });
+
+      // Also resolve referenced contacts (customer_contact_ids / signing_authority_ids) with their emails
+      const refIds = new Set<number>();
+      for (const r of rows) {
+        for (const key of ["customer_contact_ids", "signing_authority_ids", "child_ids"] as const) {
+          const v = r[key];
+          if (Array.isArray(v)) {
+            for (const id of v) if (typeof id === "number") refIds.add(id);
+          }
+        }
+      }
+      const referenced =
+        refIds.size > 0
+          ? ((await client.executeKw(
+              uid,
+              "res.partner",
+              "search_read",
+              [[["id", "in", [...refIds]]]],
+              {
+                fields: ["id", "name", "email", "parent_id", "is_company", "active"],
+                limit: 200,
+                context: { active_test: false },
+              },
+            )) as Record<string, unknown>[])
+          : [];
+
+      return NextResponse.json({ debug: true, count: rows.length, partners: rows, referenced_contacts: referenced });
     }
 
     // Build the `fields` list from the base columns + whichever custom fields

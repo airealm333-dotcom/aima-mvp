@@ -1,0 +1,47 @@
+﻿{
+    "debug":  true,
+    "count":  1,
+    "partners":  [
+                     {
+                         "id":  407,
+                         "name":  "Quarto Investment Private Limited",
+                         "display_name":  "Quarto Investment Private Limited",
+                         "email":  "inderawatiutama@gmail.com",
+                         "phone":  "+65 63039118",
+                         "vat":  false,
+                         "ref":  false,
+                         "is_company":  true,
+                         "parent_id":  false,
+                         "child_ids":  [
+
+                                       ],
+                         "user_id":  [
+                                         13,
+                                         "Jaspreet Kaur"
+                                     ],
+                         "company_registry":  false,
+                         "website":  false,
+                         "l10n_sg_unique_entity_number":  "202518582M",
+                         "customer_contact_ids":  [
+                                                      1155,
+                                                      1156,
+                                                      1159
+                                                  ],
+                         "signing_authority_ids":  [
+
+                                                   ],
+                         "commercial_company_name":  "Quarto Investment Private Limited",
+                         "company_name":  false,
+                         "street":  "72 Circular Road,",
+                         "city":  "Singapore",
+                         "country_id":  [
+                                            197,
+                                            "Singapore"
+                                        ],
+                         "active":  true
+                     }
+                 ],
+    "referenced_contacts":  [
+
+                            ]
+}

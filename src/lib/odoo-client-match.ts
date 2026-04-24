@@ -607,83 +607,116 @@ export async function resolveOdooRecipientContact(input: {
   const { accountingManagerEmail, accountingManagerName } =
     await resolveAccountingManager(input.client, input.uid, parent);
 
-  // --- Gather child contacts via two paths ---
+  // --- Gather contacts separately by source so we can prioritize real children ---
+  type ContactRow = { row: Record<string, unknown>; source: "child" | "alt" };
   const seenIds = new Set<number>();
-  const allChildRows: Record<string, unknown>[] = [];
+  const childContacts: ContactRow[] = [];
+  const altContacts: ContactRow[] = [];
 
-  const mergeRows = (rows: Record<string, unknown>[]) => {
+  const push = (rows: Record<string, unknown>[], source: "child" | "alt") => {
     for (const r of rows) {
       const id = typeof r.id === "number" ? r.id : Number(r.id);
-      if (Number.isFinite(id) && !seenIds.has(id)) {
-        seenIds.add(id);
-        allChildRows.push(r);
-      }
+      if (!Number.isFinite(id) || seenIds.has(id)) continue;
+      seenIds.add(id);
+      (source === "child" ? childContacts : altContacts).push({ row: r, source });
     }
   };
 
-  // Path A: use child_ids from parent record
+  // Fetches include archived records (active_test: false) because this Odoo
+  // tenant's contacts are often archived but still the correct email recipient.
+  const fetchContacts = async (domain: unknown[]): Promise<Record<string, unknown>[]> => {
+    const result = await input.client.executeKw(
+      input.uid,
+      "res.partner",
+      "search_read",
+      [domain],
+      { fields: contactFields, limit: 200, context: { active_test: false } },
+    );
+    return Array.isArray(result) ? (result as Record<string, unknown>[]) : [];
+  };
+
+  // Path A: child_ids on parent record
   const childIds = Array.isArray(parent?.child_ids)
     ? (parent.child_ids as unknown[]).filter((v) => typeof v === "number")
     : [];
   if (childIds.length > 0) {
-    const rows = await input.client.searchReadPartners(
-      input.uid,
-      [["id", "in", childIds]],
-      contactFields,
-      200,
-    );
-    mergeRows(rows);
+    push(await fetchContacts([["id", "in", childIds]]), "child");
   }
 
-  // Path B: parent_id search (catches contacts not listed in child_ids)
-  const byParent = await input.client.searchReadPartners(
-    input.uid,
-    [["parent_id", "=", input.partnerId]],
-    contactFields,
-    200,
-  );
-  mergeRows(byParent);
+  // Path B: parent_id search (catches children not listed in child_ids)
+  const byParent = await fetchContacts([["parent_id", "=", input.partnerId]]);
+  push(byParent, "child");
 
-  // Path C: customer_contact_ids + signing_authority_ids (Odoo extension fields where
-  // some tenants store the real recipient contacts instead of child records).
-  const altContactIds: number[] = [];
-  for (const key of ["customer_contact_ids", "signing_authority_ids"] as const) {
+  // Path C: signing_authority_ids (these are the authorized mail recipients —
+  // the "[primary]" badge in Odoo's UI comes from the first-listed entry here)
+  // then customer_contact_ids as a fallback.
+  // ORDER MATTERS — we preserve the Odoo-supplied sequence so the first signatory
+  // is the one we pick. Odoo's search_read returns records in id order by default,
+  // which is NOT what we want.
+  const collectIds = (key: "customer_contact_ids" | "signing_authority_ids"): number[] => {
     const raw = parent?.[key];
-    if (Array.isArray(raw)) {
-      for (const v of raw) {
-        if (typeof v === "number" && Number.isFinite(v)) altContactIds.push(v);
-      }
+    if (!Array.isArray(raw)) return [];
+    const out: number[] = [];
+    for (const v of raw) {
+      if (typeof v === "number" && Number.isFinite(v)) out.push(v);
+    }
+    return out;
+  };
+
+  const signingIds = collectIds("signing_authority_ids");
+  const customerIds = collectIds("customer_contact_ids");
+  // Signing authorities first (preserving list order), then customer contacts
+  // (also preserving order). Dedupe while keeping first occurrence.
+  const orderedAltIds: number[] = [];
+  const altSeen = new Set<number>();
+  for (const id of [...signingIds, ...customerIds]) {
+    if (!altSeen.has(id)) {
+      altSeen.add(id);
+      orderedAltIds.push(id);
     }
   }
+  const altContactIds = orderedAltIds;
   if (altContactIds.length > 0) {
-    const altRows = await input.client.searchReadPartners(
-      input.uid,
-      [["id", "in", [...new Set(altContactIds)]]],
-      contactFields,
-      200,
-    );
-    mergeRows(altRows);
+    const altRowsUnordered = await fetchContacts([["id", "in", altContactIds]]);
+    // Re-order by the sequence in orderedAltIds so the first signatory wins
+    const byId = new Map<number, Record<string, unknown>>();
+    for (const r of altRowsUnordered) {
+      const id = typeof r.id === "number" ? r.id : Number(r.id);
+      if (Number.isFinite(id)) byId.set(id, r);
+    }
+    const altRowsOrdered: Record<string, unknown>[] = [];
+    for (const id of orderedAltIds) {
+      const r = byId.get(id);
+      if (r) altRowsOrdered.push(r);
+    }
+    push(altRowsOrdered, "alt");
   }
 
-  console.log(`[D4] partnerId=${input.partnerId} contacts found: ${allChildRows.length} (child_ids=${childIds.length}, parent_id_search=${byParent.length}, alt_contacts=${altContactIds.length})`);
+  console.log(
+    `[D4] partnerId=${input.partnerId} contacts found: child=${childContacts.length} alt=${altContacts.length} (child_ids=${childIds.length}, parent_id_search=${byParent.length}, alt_contact_ids=${altContactIds.length})`,
+  );
 
-  // --- Apply priority ---
-  const withEmail = allChildRows
-    .map((r) => ({
-      id: typeof r.id === "number" ? r.id : Number(r.id),
-      name: typeof r.name === "string" ? r.name : null,
-      email: normalizeEmail(r.email),
-      isPrimary: roFlagField ? isTruthy(r[roFlagField]) : false,
-    }))
+  const toContact = (r: Record<string, unknown>) => ({
+    id: typeof r.id === "number" ? r.id : Number(r.id),
+    name: typeof r.name === "string" ? r.name : null,
+    email: normalizeEmail(r.email),
+    isPrimary: roFlagField ? isTruthy(r[roFlagField]) : false,
+  });
+
+  const childWithEmail = childContacts
+    .map(({ row }) => toContact(row))
     .filter((r) => Number.isFinite(r.id) && r.email != null) as Array<{
-    id: number;
-    name: string | null;
-    email: string;
-    isPrimary: boolean;
+    id: number; name: string | null; email: string; isPrimary: boolean;
   }>;
 
-  // 1) Primary contact (x_ro_mail_recipient = true)
-  const primary = withEmail.find((r) => r.isPrimary);
+  const altWithEmail = altContacts
+    .map(({ row }) => toContact(row))
+    .filter((r) => Number.isFinite(r.id) && r.email != null) as Array<{
+    id: number; name: string | null; email: string; isPrimary: boolean;
+  }>;
+
+  // 1) Primary contact flag (among children only — alt contacts are unreliable)
+  const primary = childWithEmail.find((r) => r.isPrimary);
   if (primary) {
     console.log(`[D4] partnerId=${input.partnerId} → primary_contact "${primary.name}" <${primary.email}>`);
     return {
@@ -696,8 +729,8 @@ export async function resolveOdooRecipientContact(input: {
     };
   }
 
-  // 2) Secondary contact (any child with valid email)
-  const secondary = withEmail[0];
+  // 2) Secondary — any real child with a valid email
+  const secondary = childWithEmail[0];
   if (secondary) {
     console.log(`[D4] partnerId=${input.partnerId} → secondary_contact "${secondary.name}" <${secondary.email}>`);
     return {
@@ -710,7 +743,10 @@ export async function resolveOdooRecipientContact(input: {
     };
   }
 
-  // 3) Company email fallback — use company name as contact name
+  // 3) Company email — in this Odoo tenant, the partner's `email` field is
+  // typically the primary contact's email set correctly. Preferred over
+  // customer_contact_ids/signing_authority_ids which often contain unrelated
+  // records added by the custom contacts module.
   const companyEmail = normalizeEmail(parent?.email);
   if (parent && companyEmail) {
     const id = typeof parent.id === "number" ? parent.id : Number(parent.id);
@@ -721,6 +757,21 @@ export async function resolveOdooRecipientContact(input: {
       contactName: companyName,
       email: companyEmail,
       resolutionMethod: "company_email",
+      accountingManagerEmail,
+      accountingManagerName,
+    };
+  }
+
+  // 4) Last resort — alt contact from customer_contact_ids / signing_authority_ids.
+  // Only reached if the company has no children AND no email set at all.
+  const altFallback = altWithEmail[0];
+  if (altFallback) {
+    console.log(`[D4] partnerId=${input.partnerId} → alt_contact "${altFallback.name}" <${altFallback.email}> (last resort — no company email)`);
+    return {
+      contactId: altFallback.id,
+      contactName: altFallback.name ?? null,
+      email: altFallback.email,
+      resolutionMethod: "secondary_contact",
       accountingManagerEmail,
       accountingManagerName,
     };
