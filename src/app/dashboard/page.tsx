@@ -34,6 +34,7 @@ type OcrSplitItem = {
   odoo_accounting_manager_name: string | null;
   deferred_at: string | null;
   dispatched_at: string | null;
+  closed_at: string | null;
 };
 
 type OcrSummary = {
@@ -125,6 +126,7 @@ function mailItem(doc: DashboardDoc): MailItemEmbed {
 function reviewReasons(item: OcrSplitItem): string[] {
   if (item.dispatched_at) return [];
   if (item.deferred_at) return [];
+  if (item.closed_at) return [];
   const r: string[] = [];
   if (item.confidence != null && item.confidence < CONFIDENCE_THRESHOLD)
     r.push(`Low confidence (${item.confidence}%)`);
@@ -440,6 +442,7 @@ function ProcessedDocCard({
 
 function ReviewCard({ flat }: { flat: FlatClientItem }) {
   const { item, drid, docId, reviewReasons: reasons } = flat;
+  const isDeferred = Boolean(item.deferred_at);
   return (
     <Link href={`/dashboard/review/${docId}?item=${item.index}`} className="block">
       <article className="cursor-pointer rounded-lg border border-amber-200 bg-white p-3 shadow-sm transition-colors hover:border-amber-400 hover:bg-amber-50 dark:border-amber-900/50 dark:bg-zinc-900 dark:hover:border-amber-600 dark:hover:bg-zinc-800">
@@ -449,16 +452,32 @@ function ReviewCard({ flat }: { flat: FlatClientItem }) {
           </span>
           <OdooBadge status={item.odoo_match_status} />
         </div>
-        <div className="mb-2 flex flex-wrap gap-1">
-          {reasons.map((r) => (
-            <span
-              key={r}
-              className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-800 dark:bg-amber-900/40 dark:text-amber-300"
-            >
-              {r}
-            </span>
-          ))}
-        </div>
+        {!isDeferred && (
+          <div className="mb-2 flex flex-wrap gap-1">
+            {reasons.map((r) => (
+              <span
+                key={r}
+                className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-800 dark:bg-amber-900/40 dark:text-amber-300"
+              >
+                {r}
+              </span>
+            ))}
+          </div>
+        )}
+        {isDeferred && (item.odoo_accounting_manager_name || item.odoo_accounting_manager_email) && (
+          <div className="mb-2 rounded bg-zinc-100 px-2 py-1 text-[11px] text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
+            <span className="font-medium">Manager:</span>{" "}
+            {item.odoo_accounting_manager_name ?? "—"}
+            {item.odoo_accounting_manager_email ? (
+              <span className="text-zinc-500"> · {item.odoo_accounting_manager_email}</span>
+            ) : null}
+          </div>
+        )}
+        {isDeferred && item.odoo_contact_email && (
+          <div className="mb-2 text-[11px] text-zinc-500 dark:text-zinc-400">
+            Contact: <span className="text-zinc-700 dark:text-zinc-300">{item.odoo_contact_email}</span>
+          </div>
+        )}
         <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-zinc-400">
           <span>UEN: {item.UEN}</span>
           <span>pp. {item.page_range}</span>

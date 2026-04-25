@@ -10,6 +10,7 @@ export type OcrClientReviewFields = {
   pdfError?: string | null;
   deferred_at?: string | null;
   dispatched_at?: string | null;
+  closed_at?: string | null;
 };
 
 export function ocrClientItemIsDeferred(
@@ -18,11 +19,19 @@ export function ocrClientItemIsDeferred(
   return Boolean(item.deferred_at);
 }
 
+export function ocrClientItemIsClosed(
+  item: OcrClientReviewFields | Record<string, unknown>,
+): boolean {
+  return Boolean(item.closed_at);
+}
+
 export function ocrClientItemNeedsReview(
   item: OcrClientReviewFields | Record<string, unknown>,
 ): boolean {
   // Already dispatched — email has gone, no review possible.
   if (item.dispatched_at) return false;
+  // Manually closed without dispatch — user decided "done", no action.
+  if (ocrClientItemIsClosed(item)) return false;
   // Deferred items are parked — not in needs-review, not dispatchable.
   if (ocrClientItemIsDeferred(item)) return false;
   const conf = item.confidence as number | null | undefined;

@@ -33,6 +33,7 @@ type OcrSplitItem = {
   odoo_contact_name: string | null;
   dispatched_at: string | null;
   deferred_at: string | null;
+  closed_at: string | null;
 };
 
 type ReviewDoc = {
@@ -74,6 +75,7 @@ const CONFIDENCE_THRESHOLD = 70;
 function reviewReasons(item: OcrSplitItem): string[] {
   if (item.dispatched_at) return [];
   if (item.deferred_at) return [];
+  if (item.closed_at) return [];
   const r: string[] = [];
   if (item.confidence != null && item.confidence < CONFIDENCE_THRESHOLD)
     r.push(`Low confidence (${Math.round(item.confidence)}%)`);
@@ -420,6 +422,52 @@ export default function ReviewDetailPage() {
       setDeferSaving(false);
     }
   }, [currentItem, documentId, doc]);
+
+  // ── Deferred: save manager/contact (stays deferred) or close (moves to processed, no email) ──
+  const [deferredBusy, setDeferredBusy] = useState(false);
+  const [deferredSaved, setDeferredSaved] = useState(false);
+  const callDeferredAction = useCallback(
+    async (action: "save" | "close") => {
+      if (!currentItem) return;
+      const selectedMgr =
+        typeof selectedManagerId === "number"
+          ? odooUsers.find((u) => u.id === selectedManagerId)
+          : null;
+      setDeferredBusy(true);
+      setDeferredSaved(false);
+      try {
+        const res = await fetch(
+          `/api/dashboard/review/${documentId}/items/${currentItem.index}/process-deferred`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              action,
+              email: contactEmail,
+              accountingManagerName: selectedMgr?.name ?? "",
+              accountingManagerEmail: selectedMgr?.email ?? "",
+            }),
+          },
+        );
+        const d = (await res.json()) as { item?: OcrSplitItem; error?: string };
+        if (d.item && doc) {
+          const updatedItems = doc.ocr_clients_items?.map((it) =>
+            it.index === currentItem.index ? (d.item as OcrSplitItem) : it,
+          ) ?? null;
+          setDoc({ ...doc, ocr_clients_items: updatedItems });
+          if (action === "save") {
+            setDeferredSaved(true);
+            setTimeout(() => setDeferredSaved(false), 2500);
+          }
+        }
+      } finally {
+        setDeferredBusy(false);
+      }
+    },
+    [currentItem, contactEmail, selectedManagerId, odooUsers, documentId, doc],
+  );
+  const handleSaveDeferred = useCallback(() => callDeferredAction("save"), [callDeferredAction]);
+  const handleCloseDeferred = useCallback(() => callDeferredAction("close"), [callDeferredAction]);
 
   // ─── Render ───────────────────────────────────────────────────────────────
 
@@ -801,60 +849,93 @@ export default function ReviewDetailPage() {
 
               {(() => {
                 const alreadyDispatched = Boolean(item.dispatched_at);
+                const alreadyClosed = Boolean(item.closed_at);
                 const alreadyMatched = item.odoo_match_status === "matched";
                 const missingInputs = !contactEmail.trim() || selectedManagerId === "";
                 const isDeferred = Boolean(item.deferred_at);
 
-                return (
-                  <>
-                    {/* Status banner (informational) */}
-                    {alreadyDispatched && (
-                      <p className="mt-3 rounded border border-green-800/50 bg-green-950/30 px-3 py-2 text-xs text-green-300">
-                        ✓ Email already dispatched — no further action needed.
-                      </p>
-                    )}
-                    {isDeferred && !alreadyDispatched && (
+                if (alreadyDispatched) {
+                  return (
+                    <p className="mt-3 rounded border border-green-800/50 bg-green-950/30 px-3 py-2 text-xs text-green-300">
+                      ✓ Email already dispatched — no further action needed.
+                    </p>
+                  );
+                }
+
+                if (alreadyClosed) {
+                  return (
+                    <p className="mt-3 rounded border border-zinc-700 bg-zinc-900/40 px-3 py-2 text-xs text-zinc-300">
+                      ✓ Marked as processed — no email was sent.
+                    </p>
+                  );
+                }
+
+                if (isDeferred) {
+                  // Deferred items: save contact/manager on the item (stays deferred)
+                  // OR close the item (moves to Processed, no email sent).
+                  return (
+                    <>
                       <p className="mt-3 rounded border border-zinc-700 bg-zinc-900/50 px-3 py-2 text-xs text-zinc-400">
-                        ⏸ Deferred — will not be dispatched until un-deferred.
+                        ⏸ Deferred — save the manager/contact to show it on the card, or mark as processed to move it out of Deferred.
+                        <span className="block mt-1 text-[10px] text-zinc-500">No email will be sent either way.</span>
                       </p>
-                    )}
-
-                    {/* Save form (only if actionable — not dispatched, not deferred) */}
-                    {!alreadyDispatched && !isDeferred && (
-                      <>
-                        <button
-                          onClick={handleSaveContact}
-                          disabled={contactSaving || missingInputs}
-                          className="mt-3 w-full rounded bg-blue-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-600 disabled:opacity-50"
-                        >
-                          {contactSaving
-                            ? "Saving…"
-                            : contactSaved
-                              ? "✓ Saved — will dispatch"
-                              : alreadyMatched
-                                ? "Update contact / manager"
-                                : "Save & mark as matched"}
-                        </button>
-                        {missingInputs && !alreadyMatched && (
-                          <p className="mt-1 text-[11px] text-zinc-500">
-                            Both contact email and accounting manager are required to mark as matched.
-                          </p>
-                        )}
-                      </>
-                    )}
-
-                    {/* Defer toggle — always available unless item is already dispatched */}
-                    {!alreadyDispatched && (
+                      <button
+                        onClick={handleSaveDeferred}
+                        disabled={deferredBusy}
+                        className="mt-3 w-full rounded bg-blue-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-600 disabled:opacity-50"
+                      >
+                        {deferredBusy
+                          ? "Saving…"
+                          : deferredSaved
+                            ? "✓ Saved"
+                            : "Save contact / manager"}
+                      </button>
+                      <button
+                        onClick={handleCloseDeferred}
+                        disabled={deferredBusy}
+                        className="mt-2 w-full rounded bg-zinc-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-600 disabled:opacity-50"
+                      >
+                        {deferredBusy ? "Closing…" : "Mark as processed (no email)"}
+                      </button>
                       <button
                         onClick={handleToggleDefer}
                         disabled={deferSaving}
                         className="mt-2 w-full rounded border border-zinc-700 bg-transparent px-3 py-1.5 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50"
                       >
-                        {deferSaving
-                          ? isDeferred ? "Undoing…" : "Deferring…"
-                          : isDeferred ? "Undo defer" : "Defer (review later)"}
+                        {deferSaving ? "Undoing…" : "Undo defer (back to review)"}
                       </button>
+                    </>
+                  );
+                }
+
+                // Normal actionable state
+                return (
+                  <>
+                    <button
+                      onClick={handleSaveContact}
+                      disabled={contactSaving || missingInputs}
+                      className="mt-3 w-full rounded bg-blue-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-600 disabled:opacity-50"
+                    >
+                      {contactSaving
+                        ? "Saving…"
+                        : contactSaved
+                          ? "✓ Saved — will dispatch"
+                          : alreadyMatched
+                            ? "Update contact / manager"
+                            : "Save & mark as matched"}
+                    </button>
+                    {missingInputs && !alreadyMatched && (
+                      <p className="mt-1 text-[11px] text-zinc-500">
+                        Both contact email and accounting manager are required to mark as matched.
+                      </p>
                     )}
+                    <button
+                      onClick={handleToggleDefer}
+                      disabled={deferSaving}
+                      className="mt-2 w-full rounded border border-zinc-700 bg-transparent px-3 py-1.5 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50"
+                    >
+                      {deferSaving ? "Deferring…" : "Defer (review later)"}
+                    </button>
                   </>
                 );
               })()}
